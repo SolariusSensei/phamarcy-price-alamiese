@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Shelf Price — Pharmacy Price List</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  window.tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink:   '#0F2A2E',
+          teal:  '#0E7C7B',
+          tealDark: '#0B5F5E',
+          sand:  '#F7F4EC',
+          clay:  '#C8553D',
+        },
+        fontFamily: {
+          display: ['"Fraunces"', 'serif'],
+          body: ['"Inter"', 'sans-serif'],
+        }
+      }
+    }
+  }
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-sand text-ink min-h-screen">
+
+<div id="app" class="max-w-5xl mx-auto px-4 pb-24"></div>
+
+<script type="module" src="script.js"></script>
+</body>
+</html>
