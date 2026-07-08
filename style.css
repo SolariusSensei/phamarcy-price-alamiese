@@ -1,0 +1,12 @@
+body { font-family: 'Inter', sans-serif; }
+.font-display { font-family: 'Fraunces', serif; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #cbd5c9; border-radius: 4px; }
+
+@media print {
+  body * { visibility: hidden; }
+  #receipt-print, #receipt-print * { visibility: visible; }
+  #receipt-print { position: fixed; top: 0; left: 0; width: 100%; }
+  .no-print { display: none !important; }
+}
