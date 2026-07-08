@@ -148,7 +148,7 @@ function renderSell() {
                 <p class="text-xs text-ink/50">${m.category}</p>
               </div>
               <div class="flex gap-2 flex-wrap">
-                ${['packet','box','card'].map(qt => {
+                ${['packet','box','card','bottle'].map(qt => {
                   const price = m['price_' + qt];
                   if (price === null || price === undefined) return '';
                   return `<button class="add-btn text-sm border border-teal text-teal rounded-lg px-3 py-1.5 hover:bg-teal hover:text-white transition"
@@ -337,10 +337,11 @@ async function renderSuggestions() {
           <input id="s-name" placeholder="Medicine name (required for new medicine)" class="w-full border border-black/10 rounded-lg px-3 py-2" />
           <input id="s-category" list="cat-list" placeholder="Category (e.g. Pain Relief)" class="w-full border border-black/10 rounded-lg px-3 py-2" />
           <datalist id="cat-list">${categories.map(c => `<option value="${c}">`).join('')}</datalist>
-          <div class="grid grid-cols-3 gap-2">
+          <div class="grid grid-cols-4 gap-2">
             <input id="s-packet" type="number" step="0.01" placeholder="Packet ₦" class="border border-black/10 rounded-lg px-2 py-2" />
             <input id="s-box" type="number" step="0.01" placeholder="Box ₦" class="border border-black/10 rounded-lg px-2 py-2" />
             <input id="s-card" type="number" step="0.01" placeholder="Card ₦" class="border border-black/10 rounded-lg px-2 py-2" />
+            <input id="s-bottle" type="number" step="0.01" placeholder="Bottle ₦" class="border border-black/10 rounded-lg px-2 py-2" />
           </div>
           <textarea id="s-note" placeholder="Note (optional — why this change?)" class="w-full border border-black/10 rounded-lg px-3 py-2"></textarea>
           <button type="submit" class="w-full bg-teal hover:bg-tealDark text-white rounded-lg py-2 font-medium">Submit suggestion</button>
@@ -360,7 +361,8 @@ async function renderSuggestions() {
                   <p class="text-sm mt-1">
                     ${s.price_packet != null ? `Packet: ${money(s.price_packet)} ` : ''}
                     ${s.price_box != null ? `Box: ${money(s.price_box)} ` : ''}
-                    ${s.price_card != null ? `Card: ${money(s.price_card)}` : ''}
+                    ${s.price_card != null ? `Card: ${money(s.price_card)} ` : ''}
+                    ${s.price_bottle != null ? `Bottle: ${money(s.price_bottle)}` : ''}
                   </p>
                   ${s.note ? `<p class="text-xs text-ink/50 italic mt-1">"${s.note}"</p>` : ''}
                 </div>
@@ -400,6 +402,7 @@ async function renderSuggestions() {
       price_packet: document.getElementById('s-packet').value ? Number(document.getElementById('s-packet').value) : null,
       price_box: document.getElementById('s-box').value ? Number(document.getElementById('s-box').value) : null,
       price_card: document.getElementById('s-card').value ? Number(document.getElementById('s-card').value) : null,
+      price_bottle: document.getElementById('s-bottle').value ? Number(document.getElementById('s-bottle').value) : null,
       note: document.getElementById('s-note').value.trim() || null,
       suggested_by: state.session.user.id,
       suggested_by_email: state.session.user.email,
@@ -440,6 +443,7 @@ function renderAdmin() {
           <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_packet" placeholder="Packet" value="${m.price_packet ?? ''}" />
           <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_box" placeholder="Box" value="${m.price_box ?? ''}" />
           <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_card" placeholder="Card" value="${m.price_card ?? ''}" />
+          <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_bottle" placeholder="Bottle" value="${m.price_bottle ?? ''}" />
           <button class="save-med-btn text-sm bg-teal hover:bg-tealDark text-white rounded-lg px-3 py-1.5" data-id="${m.id}">Save</button>
         </div>
       `).join('')}
