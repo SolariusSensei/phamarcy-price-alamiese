@@ -148,7 +148,7 @@ function renderSell() {
                 <p class="text-xs text-ink/50">${m.category}</p>
               </div>
               <div class="flex gap-2 flex-wrap">
-                ${['packet','box','card','bottle'].map(qt => {
+                ${['packet','box','card','bottle','tube','counting'].map(qt => {
                   const price = m['price_' + qt];
                   if (price === null || price === undefined) return '';
                   return `<button class="add-btn text-sm border border-teal text-teal rounded-lg px-3 py-1.5 hover:bg-teal hover:text-white transition"
@@ -362,7 +362,9 @@ async function renderSuggestions() {
                     ${s.price_packet != null ? `Packet: ${money(s.price_packet)} ` : ''}
                     ${s.price_box != null ? `Box: ${money(s.price_box)} ` : ''}
                     ${s.price_card != null ? `Card: ${money(s.price_card)} ` : ''}
-                    ${s.price_bottle != null ? `Bottle: ${money(s.price_bottle)}` : ''}
+                    ${s.price_bottle != null ? `Bottle: ${money(s.price_bottle)} ` : ''}
+${s.price_tube != null ? `Tube: ${money(s.price_tube)} ` : ''}
+${s.price_counting != null ? `Counting: ${money(s.price_counting)}` : ''}
                   </p>
                   ${s.note ? `<p class="text-xs text-ink/50 italic mt-1">"${s.note}"</p>` : ''}
                 </div>
@@ -403,6 +405,8 @@ async function renderSuggestions() {
       price_box: document.getElementById('s-box').value ? Number(document.getElementById('s-box').value) : null,
       price_card: document.getElementById('s-card').value ? Number(document.getElementById('s-card').value) : null,
       price_bottle: document.getElementById('s-bottle').value ? Number(document.getElementById('s-bottle').value) : null,
+price_tube: document.getElementById('s-tube').value ? Number(document.getElementById('s-tube').value) : null,
+price_counting: document.getElementById('s-counting').value ? Number(document.getElementById('s-counting').value) : null,
       note: document.getElementById('s-note').value.trim() || null,
       suggested_by: state.session.user.id,
       suggested_by_email: state.session.user.email,
