@@ -337,12 +337,14 @@ async function renderSuggestions() {
           <input id="s-name" placeholder="Medicine name (required for new medicine)" class="w-full border border-black/10 rounded-lg px-3 py-2" />
           <input id="s-category" list="cat-list" placeholder="Category (e.g. Pain Relief)" class="w-full border border-black/10 rounded-lg px-3 py-2" />
           <datalist id="cat-list">${categories.map(c => `<option value="${c}">`).join('')}</datalist>
-          <div class="grid grid-cols-4 gap-2">
-            <input id="s-packet" type="number" step="0.01" placeholder="Packet ₦" class="border border-black/10 rounded-lg px-2 py-2" />
-            <input id="s-box" type="number" step="0.01" placeholder="Box ₦" class="border border-black/10 rounded-lg px-2 py-2" />
-            <input id="s-card" type="number" step="0.01" placeholder="Card ₦" class="border border-black/10 rounded-lg px-2 py-2" />
-            <input id="s-bottle" type="number" step="0.01" placeholder="Bottle ₦" class="border border-black/10 rounded-lg px-2 py-2" />
-          </div>
+          <div class="grid grid-cols-3 sm:grid-cols-6 gap-2">
+  <input id="s-packet" type="number" step="0.01" placeholder="Packet ₦" class="border border-black/10 rounded-lg px-2 py-2" />
+  <input id="s-box" type="number" step="0.01" placeholder="Box ₦" class="border border-black/10 rounded-lg px-2 py-2" />
+  <input id="s-card" type="number" step="0.01" placeholder="Card ₦" class="border border-black/10 rounded-lg px-2 py-2" />
+  <input id="s-bottle" type="number" step="0.01" placeholder="Bottle ₦" class="border border-black/10 rounded-lg px-2 py-2" />
+  <input id="s-tube" type="number" step="0.01" placeholder="Tube ₦" class="border border-black/10 rounded-lg px-2 py-2" />
+  <input id="s-counting" type="number" step="0.01" placeholder="Counting ₦" class="border border-black/10 rounded-lg px-2 py-2" />
+</div>
           <textarea id="s-note" placeholder="Note (optional — why this change?)" class="w-full border border-black/10 rounded-lg px-3 py-2"></textarea>
           <button type="submit" class="w-full bg-teal hover:bg-tealDark text-white rounded-lg py-2 font-medium">Submit suggestion</button>
         </form>
@@ -448,6 +450,8 @@ function renderAdmin() {
           <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_box" placeholder="Box" value="${m.price_box ?? ''}" />
           <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_card" placeholder="Card" value="${m.price_card ?? ''}" />
           <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_bottle" placeholder="Bottle" value="${m.price_bottle ?? ''}" />
+<input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_tube" placeholder="Tube" value="${m.price_tube ?? ''}" />
+<input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_counting" placeholder="Counting" value="${m.price_counting ?? ''}" />
           <button class="save-med-btn text-sm bg-teal hover:bg-tealDark text-white rounded-lg px-3 py-1.5" data-id="${m.id}">Save</button>
         </div>
       `).join('')}
