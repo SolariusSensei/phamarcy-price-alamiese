@@ -386,7 +386,12 @@ ${s.price_counting != null ? `Counting: ${money(s.price_counting)}` : ''}
       </div>
     </div>
   `);
-
+  
+document.querySelectorAll('#suggestion-form input:not([type="submit"])').forEach(input => {
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') e.preventDefault();
+  });
+});
   document.getElementById('suggestion-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const type = document.querySelector('input[name="s-type"]:checked').value;
@@ -397,7 +402,12 @@ ${s.price_counting != null ? `Counting: ${money(s.price_counting)}` : ''}
 
     if (!name) { alert('Please give the medicine a name, or pick one from the list.'); return; }
     if (type === 'price_change' && !medicationId) { alert('Pick which existing medicine this price change is for.'); return; }
-
+const priceFields = ['s-packet','s-box','s-card','s-bottle','s-tube','s-counting'].map(id => document.getElementById(id).value);
+const noPriceEntered = priceFields.every(v => v === '');
+if (noPriceEntered) {
+  const proceed = confirm('No price was entered in any box. Submit anyway?');
+  if (!proceed) return;
+}
     const payload = {
       type,
       medication_id: type === 'price_change' ? medicationId : null,
