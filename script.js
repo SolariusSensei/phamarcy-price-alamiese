@@ -1,244 +1,900 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import {
+  DISCLAIMER,
+  UNIT_TYPES,
+  esc,
+  money,
+  fuzzyScore,
+  matchDrugReference,
+  inferGenericAndCompany,
+  findSameDrugBrands,
+  calculateSellingPriceOptions,
+  isBelowCost,
+  getAllAvailablePrices,
+  analyzeInventoryVelocity,
+  askPharmacyAI,
+} from './ai-knowledge.js';
 
 // =========================================================
-// 1. CONFIG — fill these in from Supabase: Project Settings > API
+// 1. CONFIG — Supabase Project
 // =========================================================
 const SUPABASE_URL = 'https://terygqwslkadqmfczbze.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRlcnlncXdzbGthZHFtZmN6YnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM1NDMwNDYsImV4cCI6MjA5OTExOTA0Nn0.tr82mAycYbM5kQdDMjNLg7UtRTuCE7X5qAlslpvU0uU';
+const SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRlcnlncXdzbGthZHFtZmN6YnplIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM1NDMwNDYsImV4cCI6MjA5OTExOTA0Nn0.tr82mAycYbM5kQdDMjNLg7UtRTuCE7X5qAlslpvU0uU';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const A11Y_STORAGE_KEY = 'shelfprice_a11y_v1';
 
 const app = document.getElementById('app');
-let state = {
+const srAnnouncer = document.getElementById('sr-announcer');
+const toastRegion = document.getElementById('toast-region');
+const modalRoot = document.getElementById('modal-root');
+
+function loadA11yPrefs() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(A11Y_STORAGE_KEY) || '{}');
+    return {
+      textSize: ['normal', 'large', 'xlarge'].includes(raw.textSize) ? raw.textSize : 'normal',
+      contrast: raw.contrast === 'high' ? 'high' : 'normal',
+      readable: Boolean(raw.readable),
+      showCost: false,
+    };
+  } catch {
+    return { textSize: 'normal', contrast: 'normal', readable: false, showCost: false };
+  }
+}
+
+const state = {
   session: null,
   profile: null,
+  shellKey: null,
   medications: [],
-  cart: [],       // { medication_id, name, qty_type, unit_price, quantity }
+  purchaseEntries: [],
+  suggestions: [],
+  sales: [],
+  saleItems: [],
+  cart: [],
   tab: 'sell',
-  search: '',
-  category: 'All',
+  viewingReceipt: false,
   lastReceipt: null,
+
+  // Filters kept in state so focus/inputs remain preserved
+  sellSearch: '',
+  sellCategory: 'All',
+  sellCompany: 'All',
+
+  pbSearch: '',
+  pbCompany: 'All',
+  pbSelectedMedId: '',
+
+  restockFilter: 'restock_now',
+  restockSearch: '',
+
+  historyPeriod: '30',
+  historySearch: '',
+
+  adminSearch: '',
+  adminCategory: 'All',
+  adminCompany: 'All',
+  adminMissingOnly: false,
+
+  aiPrompt: '',
+  aiLoading: false,
+  aiResults: [],
+  aiGeminiConfigured: null,
+
+  a11y: loadA11yPrefs(),
+  modalTriggerEl: null,
+  suggestionDraft: null,
 };
 
 // ---------------------------------------------------------
-// Helpers
+// Accessibility, Announcements, Toasts & Speech Helpers
 // ---------------------------------------------------------
-const money = (n) => 'NGN ' + Number(n || 0).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-async function loadMedications() {
-  const { data, error } = await supabase.from('medications').select('*').order('name');
-  if (!error) state.medications = data;
+function saveA11yPrefs() {
+  try {
+    localStorage.setItem(
+      A11Y_STORAGE_KEY,
+      JSON.stringify({
+        textSize: state.a11y.textSize,
+        contrast: state.a11y.contrast,
+        readable: state.a11y.readable,
+      }),
+    );
+  } catch {
+    // Ignore storage errors in private browsing
+  }
 }
 
-async function loadProfile() {
-  const { data } = await supabase.from('profiles').select('*').eq('id', state.session.user.id).single();
-  state.profile = data;
+function applyA11yAttrs() {
+  const root = document.documentElement;
+  root.dataset.textSize = state.a11y.textSize;
+  root.dataset.contrast = state.a11y.contrast;
+  root.dataset.readable = state.a11y.readable ? 'true' : 'false';
 }
 
+function announce(message) {
+  if (!srAnnouncer) return;
+  srAnnouncer.textContent = '';
+  setTimeout(() => {
+    srAnnouncer.textContent = message;
+  }, 30);
+}
+
+function showToast(message, type = 'info') {
+  if (!toastRegion) return;
+  const styles = {
+    info: 'bg-ink text-white border-black/20',
+    success: 'bg-tealDark text-white border-teal',
+    warn: 'bg-amber-800 text-white border-amber-900',
+    error: 'bg-red-800 text-white border-red-950',
+  };
+  const el = document.createElement('div');
+  el.setAttribute('role', 'status');
+  el.className = `pointer-events-auto rounded-xl border px-4 py-3 text-sm font-medium shadow-lg flex items-start justify-between gap-3 ${styles[type] || styles.info}`;
+  el.innerHTML = `
+    <span class="leading-snug">${esc(message)}</span>
+    <button type="button" class="touch-target -my-2 -mr-2 px-2 text-white/90 hover:text-white rounded-lg" aria-label="Dismiss notification">✕</button>
+  `;
+  const remove = () => el.remove();
+  el.querySelector('button').addEventListener('click', remove);
+  toastRegion.appendChild(el);
+  announce(message);
+  setTimeout(remove, 4800);
+}
+
+function supportsVoiceRecognition() {
+  return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
+
+function startVoiceInput(onTranscript, buttonEl = null) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    showToast('Voice input is not supported in this browser. Please type instead.', 'warn');
+    return;
+  }
+  try {
+    const rec = new SR();
+    rec.lang = 'en-NG';
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    if (buttonEl) {
+      buttonEl.setAttribute('aria-pressed', 'true');
+      buttonEl.dataset.origLabel = buttonEl.textContent;
+      buttonEl.textContent = 'Listening…';
+    }
+    announce('Listening for voice search');
+    rec.onresult = (event) => {
+      const text = event.results?.[0]?.[0]?.transcript || '';
+      if (text) onTranscript(text.trim());
+    };
+    rec.onerror = () => {
+      showToast('Could not capture voice cleanly. Please try again or type.', 'warn');
+    };
+    rec.onend = () => {
+      if (buttonEl) {
+        buttonEl.setAttribute('aria-pressed', 'false');
+        if (buttonEl.dataset.origLabel) buttonEl.textContent = buttonEl.dataset.origLabel;
+      }
+    };
+    rec.start();
+  } catch {
+    showToast('Microphone access unavailable.', 'warn');
+  }
+}
+
+function speakText(text) {
+  if (!('speechSynthesis' in window)) {
+    showToast('Read aloud is not supported in this browser.', 'warn');
+    return;
+  }
+  window.speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(String(text || '').slice(0, 1200));
+  utter.rate = 0.95;
+  window.speechSynthesis.speak(utter);
+}
+
+// ---------------------------------------------------------
+// Accessible Modal System (Escape, Backdrop, Focus Restore)
+// ---------------------------------------------------------
+function closeModal() {
+  if (!modalRoot) return;
+  modalRoot.innerHTML = '';
+  if (state.modalTriggerEl && typeof state.modalTriggerEl.focus === 'function') {
+    state.modalTriggerEl.focus();
+  }
+  state.modalTriggerEl = null;
+}
+
+function openModal({ title, bodyHtml, triggerEl = null, onMount = null }) {
+  state.modalTriggerEl = triggerEl || document.activeElement;
+  modalRoot.innerHTML = `
+    <div id="modal-backdrop" class="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 overflow-y-auto">
+      <div role="dialog" aria-modal="true" aria-labelledby="modal-title"
+        class="card-surface bg-white text-ink rounded-2xl border border-black/15 shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
+        <div class="flex items-center justify-between gap-3 px-5 py-4 border-b border-black/10">
+          <h2 id="modal-title" class="font-display text-lg font-semibold text-tealDark">${esc(title)}</h2>
+          <button type="button" id="modal-close-btn"
+            class="touch-target inline-flex items-center justify-center rounded-lg border border-black/15 px-3 py-2 text-sm font-semibold hover:bg-black/5"
+            aria-label="Close dialog">
+            Close ✕
+          </button>
+        </div>
+        <div id="modal-body" class="p-5 overflow-y-auto space-y-4">
+          ${bodyHtml}
+        </div>
+      </div>
+    </div>
+  `;
+  const closeBtn = document.getElementById('modal-close-btn');
+  const backdrop = document.getElementById('modal-backdrop');
+  closeBtn.addEventListener('click', closeModal);
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) closeModal();
+  });
+  closeBtn.focus();
+  if (typeof onMount === 'function') onMount(document.getElementById('modal-body'));
+}
+
+function confirmModal({ title, message, confirmLabel = 'Confirm', danger = false, triggerEl = null }) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      closeModal();
+      resolve(val);
+    };
+    openModal({
+      title,
+      triggerEl,
+      bodyHtml: `
+        <p class="text-sm leading-relaxed">${esc(message)}</p>
+        <div class="flex flex-wrap justify-end gap-2 pt-2">
+          <button type="button" id="confirm-cancel" class="touch-target px-4 py-2 rounded-lg border border-black/20 font-medium hover:bg-black/5">Cancel</button>
+          <button type="button" id="confirm-ok" class="touch-target px-4 py-2 rounded-lg font-semibold text-white ${danger ? 'bg-red-700 hover:bg-red-800' : 'bg-teal hover:bg-tealDark'}">${esc(confirmLabel)}</button>
+        </div>
+      `,
+      onMount: (body) => {
+        body.querySelector('#confirm-cancel').addEventListener('click', () => finish(false));
+        body.querySelector('#confirm-ok').addEventListener('click', () => finish(true));
+        document.getElementById('modal-close-btn').onclick = () => finish(false);
+        document.getElementById('modal-backdrop').onclick = (e) => {
+          if (e.target.id === 'modal-backdrop') finish(false);
+        };
+      },
+    });
+  });
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && modalRoot?.innerHTML.trim()) {
+    e.preventDefault();
+    closeModal();
+    return;
+  }
+  if (e.altKey && e.key.toLowerCase() === 'c' && state.session) {
+    e.preventDefault();
+    toggleShowCost();
+  }
+});
+
+// ---------------------------------------------------------
+// Data Loading
+// ---------------------------------------------------------
 function isOwner() {
   return state.profile?.role === 'owner';
 }
 
+async function loadProfile() {
+  const { data } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', state.session.user.id)
+    .single();
+  state.profile = data;
+}
+
+async function loadMedications() {
+  const { data, error } = await supabase.from('medications').select('*').order('name');
+  if (error) showToast('Could not load medications: ' + error.message, 'error');
+  else state.medications = data || [];
+}
+
+async function loadPurchaseEntries() {
+  const { data, error } = await supabase
+    .from('purchase_entries')
+    .select('*')
+    .order('purchased_at', { ascending: false })
+    .order('created_at', { ascending: false })
+    .limit(300);
+  if (error) showToast('Could not load Purchase Book: ' + error.message, 'warn');
+  else state.purchaseEntries = data || [];
+}
+
+async function loadSuggestions() {
+  const { data, error } = await supabase
+    .from('suggestions')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (!error) state.suggestions = data || [];
+}
+
+async function loadSalesAndItems() {
+  const [{ data: sales }, { data: items }] = await Promise.all([
+    supabase.from('sales').select('*').order('created_at', { ascending: false }).limit(150),
+    supabase.from('sale_items').select('*').order('id', { ascending: false }).limit(600),
+  ]);
+  state.sales = sales || [];
+  const saleCreatedMap = new Map(state.sales.map((s) => [s.id, s.created_at]));
+  state.saleItems = (items || []).map((it) => ({
+    ...it,
+    created_at: it.created_at || saleCreatedMap.get(it.sale_id) || null,
+  }));
+}
+
+async function loadAllData() {
+  await Promise.all([
+    loadMedications(),
+    loadPurchaseEntries(),
+    loadSuggestions(),
+    loadSalesAndItems(),
+  ]);
+}
+
 // ---------------------------------------------------------
-// Auth screen
+// Auth Screen (Accessible labels, error role="alert")
 // ---------------------------------------------------------
 function renderAuth() {
+  state.shellKey = null;
+  applyA11yAttrs();
   app.innerHTML = `
-    <div class="min-h-screen flex items-center justify-center">
-      <div class="w-full max-w-sm bg-white rounded-2xl shadow-sm border border-black/5 p-8">
-        <h1 class="font-display text-2xl text-tealDark mb-1">Shelf Price</h1>
-        <p class="text-sm text-ink/60 mb-6">Sign in to look up prices and ring up sales.</p>
-        <form id="auth-form" class="space-y-3">
-          <input id="email" type="email" required placeholder="Email"
-            class="w-full border border-black/10 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal" />
-          <input id="password" type="password" required placeholder="Password" minlength="6"
-            class="w-full border border-black/10 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-teal" />
-          <button type="submit" class="w-full bg-teal hover:bg-tealDark text-white rounded-lg py-2 font-medium transition">
+    <main id="main-content" class="min-h-screen flex items-center justify-center py-8">
+      <div class="card-surface w-full max-w-md bg-white rounded-2xl shadow-sm border border-black/10 p-8">
+        <div class="flex items-center justify-between gap-2 mb-2">
+          <h1 class="font-display text-2xl font-semibold text-tealDark">Shelf Price</h1>
+          <button type="button" id="auth-contrast-btn"
+            class="touch-target px-3 py-1.5 rounded-lg border border-black/15 text-xs font-semibold hover:bg-black/5"
+            aria-pressed="${state.a11y.contrast === 'high'}">
+            ${state.a11y.contrast === 'high' ? 'Contrast: High' : 'High Contrast'}
+          </button>
+        </div>
+        <p class="text-sm text-ink/80 mb-6">Sign in to look up counter prices, check Uncle's Purchase Book, track restock, and ask the Pharmacy AI.</p>
+        <form id="auth-form" class="space-y-4">
+          <div>
+            <label for="email" class="block text-sm font-medium mb-1">Email address</label>
+            <input id="email" type="email" required autocomplete="email" placeholder="you@pharmacy.com"
+              class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+          </div>
+          <div>
+            <label for="password" class="block text-sm font-medium mb-1">Password</label>
+            <input id="password" type="password" required autocomplete="current-password" minlength="6" placeholder="Minimum 6 characters"
+              class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+          </div>
+          <button type="submit" class="touch-target w-full bg-teal hover:bg-tealDark text-white rounded-lg py-2.5 font-semibold transition">
             Sign in
           </button>
-          <button type="button" id="signup-btn" class="w-full text-teal text-sm py-1 hover:underline">
+          <button type="button" id="signup-btn" class="touch-target w-full text-tealDark font-medium text-sm py-2 rounded-lg border border-teal/30 hover:bg-teal/5">
             First time here? Create an account
           </button>
         </form>
-        <p id="auth-msg" class="text-sm text-clay mt-3"></p>
+        <p id="auth-msg" role="alert" class="text-sm font-medium text-clay mt-4 min-h-[1.25rem]"></p>
       </div>
-    </div>
+    </main>
   `;
+
+  document.getElementById('auth-contrast-btn').addEventListener('click', () => {
+    state.a11y.contrast = state.a11y.contrast === 'high' ? 'normal' : 'high';
+    saveA11yPrefs();
+    renderAuth();
+  });
+
   document.getElementById('auth-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const email = document.getElementById('email').value;
+    const msg = document.getElementById('auth-msg');
+    msg.textContent = 'Signing in…';
+    const email = document.getElementById('email').value.trim();
     const password = document.getElementById('password').value;
     const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) document.getElementById('auth-msg').textContent = error.message;
+    if (error) msg.textContent = error.message;
   });
+
   document.getElementById('signup-btn').addEventListener('click', async () => {
-    const email = document.getElementById('email').value;
+    const msg = document.getElementById('auth-msg');
+    const email = document.getElementById('email').value.trim();
     const password = document.getElementById('password').value;
     if (!email || !password) {
-      document.getElementById('auth-msg').textContent = 'Type an email and password above first, then tap this again.';
+      msg.textContent = 'Type your email and password above first, then select Create an account.';
       return;
     }
     const { error } = await supabase.auth.signUp({ email, password });
-    document.getElementById('auth-msg').textContent = error ? error.message : 'Account created — check your email if confirmation is required, then sign in.';
+    msg.textContent = error
+      ? error.message
+      : 'Account created — check your email if confirmation is required, then sign in.';
   });
 }
 
 // ---------------------------------------------------------
-// Shell / nav
+// Shell & Accessibility Quick Bar (Mounted Once Per Session)
 // ---------------------------------------------------------
-function renderShell(innerHtml) {
+function getTabs() {
+  const pendingCount = state.suggestions.filter((s) => s.status === 'pending').length;
+  const vel = analyzeInventoryVelocity(state.medications, state.saleItems, state.purchaseEntries);
   const tabs = [
     { id: 'sell', label: 'Sell' },
+    { id: 'purchase', label: 'Purchase Book' },
+    { id: 'restock', label: 'Restock', badge: vel.urgentItems.length || null },
+    { id: 'ai', label: 'AI Assistant' },
+    { id: 'suggestions', label: 'Suggestions', badge: pendingCount || null },
     { id: 'history', label: 'Sales History' },
-    { id: 'suggestions', label: 'Suggestions' },
   ];
   if (isOwner()) tabs.push({ id: 'admin', label: 'Price List (Admin)' });
+  return tabs;
+}
 
+function updateA11yButtons() {
+  const textBtn = document.getElementById('a11y-text-btn');
+  const contrastBtn = document.getElementById('a11y-contrast-btn');
+  const readBtn = document.getElementById('a11y-readable-btn');
+  const costBtn = document.getElementById('cost-toggle-btn');
+
+  if (textBtn) {
+    const labels = { normal: 'Text: A', large: 'Text: A+', xlarge: 'Text: A++' };
+    textBtn.textContent = labels[state.a11y.textSize];
+    textBtn.setAttribute('aria-label', `Cycle text size, currently ${state.a11y.textSize}`);
+  }
+  if (contrastBtn) {
+    contrastBtn.setAttribute('aria-pressed', String(state.a11y.contrast === 'high'));
+    contrastBtn.textContent = state.a11y.contrast === 'high' ? 'High Contrast: On' : 'High Contrast';
+  }
+  if (readBtn) {
+    readBtn.setAttribute('aria-pressed', String(state.a11y.readable));
+    readBtn.textContent = state.a11y.readable ? 'Easy-Read: On' : 'Easy-Read';
+  }
+  if (costBtn) {
+    costBtn.setAttribute('aria-pressed', String(state.a11y.showCost));
+    costBtn.textContent = state.a11y.showCost ? 'Hide Buy Cost' : 'Show Buy Cost';
+    costBtn.classList.toggle('bg-amber-700', state.a11y.showCost);
+    costBtn.classList.toggle('text-white', state.a11y.showCost);
+  }
+  const sellCostToggle = document.getElementById('sell-cost-toggle');
+  if (sellCostToggle) sellCostToggle.checked = state.a11y.showCost;
+}
+
+function toggleShowCost() {
+  state.a11y.showCost = !state.a11y.showCost;
+  updateA11yButtons();
+  announce(state.a11y.showCost ? 'Wholesale buy costs shown on cards' : 'Wholesale buy costs hidden for customer privacy');
+  if (state.tab === 'sell' && !state.viewingReceipt) updateSellResults();
+}
+
+function refreshTabBar() {
+  const nav = document.getElementById('main-tablist');
+  if (!nav) return;
+  const tabs = getTabs();
+  nav.innerHTML = tabs
+    .map((t) => {
+      const active = state.tab === t.id && !state.viewingReceipt;
+      const badgeHtml = t.badge
+        ? `<span class="ml-1.5 inline-flex items-center justify-center rounded-full px-1.5 py-0.5 text-xs font-bold ${active ? 'bg-white text-tealDark' : 'bg-amber-100 text-amber-900'}">${t.badge}</span>`
+        : '';
+      return `
+        <button type="button" role="tab" id="tab-${t.id}" data-tab="${t.id}"
+          aria-selected="${active}" aria-controls="tab-panel" tabindex="${active ? '0' : '-1'}"
+          class="tab-btn touch-target px-4 py-2 rounded-lg text-sm font-semibold whitespace-nowrap transition ${
+            active ? 'bg-teal text-white' : 'text-ink/80 hover:bg-black/5'
+          }">
+          ${esc(t.label)}${badgeHtml}
+        </button>`;
+    })
+    .join('');
+
+  nav.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab, { moveFocus: true }));
+    btn.addEventListener('keydown', (e) => {
+      const list = [...nav.querySelectorAll('[role="tab"]')];
+      const idx = list.indexOf(btn);
+      let nextIdx = null;
+      if (e.key === 'ArrowRight') nextIdx = (idx + 1) % list.length;
+      else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + list.length) % list.length;
+      else if (e.key === 'Home') nextIdx = 0;
+      else if (e.key === 'End') nextIdx = list.length - 1;
+      if (nextIdx !== null) {
+        e.preventDefault();
+        const target = list[nextIdx];
+        switchTab(target.dataset.tab, { moveFocus: false });
+        document.getElementById(`tab-${target.dataset.tab}`)?.focus();
+      }
+    });
+  });
+}
+
+function mountShell() {
+  applyA11yAttrs();
+  const key = `${state.session.user.id}:${state.profile?.role || 'staff'}`;
+  if (state.shellKey === key && document.getElementById('tab-panel')) {
+    refreshTabBar();
+    updateA11yButtons();
+    return;
+  }
+
+  state.shellKey = key;
   app.innerHTML = `
-    <header class="flex items-center justify-between py-5">
+    <header class="no-print flex flex-col sm:flex-row sm:items-center justify-between gap-3 py-4 border-b border-black/10 mb-4">
       <div>
-        <h1 class="font-display text-xl text-tealDark">Shelf Price</h1>
-        <p class="text-xs text-ink/50">${state.profile?.email || ''} · ${isOwner() ? 'Owner' : 'Staff'}</p>
+        <h1 class="font-display text-2xl font-semibold text-tealDark">Shelf Price</h1>
+        <p class="text-sm text-ink/80">${esc(state.profile?.email || state.session.user.email)} · <span class="font-semibold">${isOwner() ? 'Owner' : 'Counter Staff'}</span></p>
       </div>
-      <button id="signout" class="text-sm text-ink/50 hover:text-clay">Sign out</button>
+      <div class="flex flex-wrap items-center gap-2" role="region" aria-label="Accessibility and quick controls">
+        <button type="button" id="a11y-text-btn" class="touch-target px-3 py-2 rounded-lg border border-black/15 bg-white text-xs font-semibold hover:bg-black/5"></button>
+        <button type="button" id="a11y-contrast-btn" class="touch-target px-3 py-2 rounded-lg border border-black/15 bg-white text-xs font-semibold hover:bg-black/5"></button>
+        <button type="button" id="a11y-readable-btn" class="touch-target px-3 py-2 rounded-lg border border-black/15 bg-white text-xs font-semibold hover:bg-black/5"></button>
+        <button type="button" id="cost-toggle-btn" title="Shortcut: Alt+C" class="touch-target px-3 py-2 rounded-lg border border-black/15 bg-white text-xs font-semibold hover:bg-black/5"></button>
+        <button type="button" id="signout" class="touch-target px-3 py-2 rounded-lg border border-clay/40 text-clay text-xs font-semibold hover:bg-clay/10">Sign out</button>
+      </div>
     </header>
-    <nav class="flex gap-1 mb-6 bg-white/60 p-1 rounded-xl border border-black/5 w-fit">
-      ${tabs.map(t => `
-        <button data-tab="${t.id}" class="tab-btn px-4 py-2 rounded-lg text-sm font-medium transition ${state.tab === t.id ? 'bg-teal text-white' : 'text-ink/60 hover:bg-black/5'}">
-          ${t.label}
-        </button>`).join('')}
+
+    <nav aria-label="Primary sections" class="no-print mb-5 overflow-x-auto pb-1">
+      <div id="main-tablist" role="tablist" class="card-surface inline-flex gap-1 bg-white/80 p-1.5 rounded-xl border border-black/10 min-w-max"></div>
     </nav>
-    <div id="tab-content">${innerHtml}</div>
+
+    <main id="main-content">
+      <div id="tab-panel" role="tabpanel" aria-live="polite"></div>
+    </main>
   `;
+
+  document.getElementById('a11y-text-btn').addEventListener('click', () => {
+    const order = ['normal', 'large', 'xlarge'];
+    const idx = order.indexOf(state.a11y.textSize);
+    state.a11y.textSize = order[(idx + 1) % order.length];
+    applyA11yAttrs();
+    saveA11yPrefs();
+    updateA11yButtons();
+    announce(`Text size set to ${state.a11y.textSize}`);
+  });
+
+  document.getElementById('a11y-contrast-btn').addEventListener('click', () => {
+    state.a11y.contrast = state.a11y.contrast === 'high' ? 'normal' : 'high';
+    applyA11yAttrs();
+    saveA11yPrefs();
+    updateA11yButtons();
+    announce(`High contrast ${state.a11y.contrast === 'high' ? 'enabled' : 'disabled'}`);
+  });
+
+  document.getElementById('a11y-readable-btn').addEventListener('click', () => {
+    state.a11y.readable = !state.a11y.readable;
+    applyA11yAttrs();
+    saveA11yPrefs();
+    updateA11yButtons();
+    announce(`Easy-read spacing ${state.a11y.readable ? 'enabled' : 'disabled'}`);
+  });
+
+  document.getElementById('cost-toggle-btn').addEventListener('click', toggleShowCost);
   document.getElementById('signout').addEventListener('click', () => supabase.auth.signOut());
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => { state.tab = btn.dataset.tab; render(); });
+
+  refreshTabBar();
+  updateA11yButtons();
+}
+
+function switchTab(tabId, { moveFocus = true } = {}) {
+  if (tabId === 'admin' && !isOwner()) tabId = 'sell';
+  state.tab = tabId;
+  state.viewingReceipt = false;
+  refreshTabBar();
+  renderActiveTabPanel();
+  if (moveFocus) {
+    const heading = document.querySelector('#tab-panel h2');
+    if (heading) {
+      heading.setAttribute('tabindex', '-1');
+      heading.focus();
+    }
+  }
+}
+
+// ---------------------------------------------------------
+// Reusable Modals: Compare Brands & Drug Safety Info
+// ---------------------------------------------------------
+function openBrandComparisonModal(medicationId, triggerEl = null) {
+  const med = state.medications.find((m) => m.id === medicationId);
+  if (!med) return;
+  const brands = findSameDrugBrands(med, state.medications);
+  const meta = inferGenericAndCompany(med);
+
+  const rowsHtml = brands
+    .map((b) => {
+      const bm = inferGenericAndCompany(b);
+      const prices = getAllAvailablePrices(b);
+      const stockText =
+        b.stock_qty === null || b.stock_qty === undefined
+          ? 'Stock not tracked'
+          : `${b.stock_qty} ${b.stock_unit || 'unit'} in shelf`;
+      const isLow = b.stock_qty !== null && b.stock_qty <= (b.reorder_level ?? 5);
+      return `
+        <div class="card-surface rounded-xl border border-black/15 p-4 space-y-2 ${b.id === med.id ? 'bg-teal/5' : 'bg-white'}">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p class="font-semibold text-base">${esc(b.name)}</p>
+              <p class="text-xs text-ink/80">
+                Company: <strong>${esc(bm.company || 'Unlabeled / House')}</strong>
+                · Ingredient: <strong>${esc(bm.generic || 'Not grouped')}</strong>
+              </p>
+            </div>
+            <span class="text-xs font-semibold px-2.5 py-1 rounded-full ${
+              b.stock_qty === null ? 'bg-slate-100 text-slate-800' : isLow ? 'bg-amber-100 text-amber-900' : 'bg-emerald-100 text-emerald-900'
+            }">${esc(stockText)}</span>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            ${
+              prices
+                .map(
+                  (p) => `
+                  <button type="button" class="cmp-add-btn touch-target text-sm border border-teal text-tealDark font-medium rounded-lg px-3 py-2 hover:bg-teal hover:text-white transition"
+                    data-id="${esc(b.id)}" data-name="${esc(b.name)}" data-type="${esc(p.qtyType)}" data-price="${p.unitPrice}"
+                    aria-label="Add ${esc(b.name)} ${esc(p.qtyType)} ${esc(money(p.unitPrice))} to sale">
+                    ${esc(p.qtyType.charAt(0).toUpperCase() + p.qtyType.slice(1))} · ${esc(money(p.unitPrice))}
+                  </button>`,
+                )
+                .join('') || '<span class="text-sm text-ink/70 italic">No selling price set yet</span>'
+            }
+          </div>
+        </div>`;
+    })
+    .join('');
+
+  openModal({
+    title: `Same-Drug Companies: ${meta.generic || med.name}`,
+    triggerEl,
+    bodyHtml: `
+      <p class="text-sm text-ink/80">Showing all ${brands.length} stocked item(s) sharing <strong>${esc(meta.generic || med.name)}</strong> so you can pick the right company on the shelf:</p>
+      <div class="space-y-3">${rowsHtml}</div>
+    `,
+    onMount: (body) => {
+      body.querySelectorAll('.cmp-add-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          addToCart({
+            id: btn.dataset.id,
+            name: btn.dataset.name,
+            qtyType: btn.dataset.type,
+            unitPrice: Number(btn.dataset.price),
+          });
+          showToast(`Added ${btn.dataset.name} (${btn.dataset.type}) to sale`, 'success');
+        });
+      });
+    },
+  });
+}
+
+function openDrugInfoModal(medicationId, triggerEl = null) {
+  const med = state.medications.find((m) => m.id === medicationId);
+  if (!med) return;
+  const meta = inferGenericAndCompany(med);
+  const ref = meta.ref || matchDrugReference(med);
+
+  const infoHtml = ref
+    ? `
+      <div class="rounded-xl bg-teal/5 border border-teal/25 p-4 space-y-1">
+        <p class="text-xs font-bold uppercase tracking-wide text-tealDark">${esc(ref.drugClass)}</p>
+        <p class="text-base font-semibold">${esc(ref.generic)}</p>
+        <p class="text-sm">${esc(ref.whatItTreats)}</p>
+      </div>
+      <div class="space-y-2">
+        <h3 class="font-semibold text-base text-tealDark">Age-Group Guidance</h3>
+        <ul class="text-sm space-y-2 list-disc pl-5">
+          <li><strong>Infants &amp; Children:</strong> ${esc(ref.ageGuidance.infantsChildren)}</li>
+          <li><strong>Adults:</strong> ${esc(ref.ageGuidance.adults)}</li>
+          <li><strong>Elderly:</strong> ${esc(ref.ageGuidance.elderly)}</li>
+          <li><strong>Pregnancy &amp; Breastfeeding:</strong> ${esc(ref.ageGuidance.pregnancyBreastfeeding)}</li>
+        </ul>
+      </div>
+      <div class="rounded-xl bg-red-50 border border-red-300 p-4 space-y-1">
+        <h3 class="font-semibold text-sm text-red-900">Allergies &amp; Who Should NOT Take It</h3>
+        <p class="text-sm text-red-950 leading-relaxed">${esc(ref.allergiesAndAvoid)}</p>
+      </div>
+      <div class="rounded-xl bg-amber-50 border border-amber-300 p-4 space-y-1">
+        <h3 class="font-semibold text-sm text-amber-950">Key Warnings</h3>
+        <p class="text-sm text-amber-950 leading-relaxed">${esc(ref.warnings)}</p>
+      </div>
+    `
+    : `
+      <div class="rounded-xl bg-amber-50 border border-amber-300 p-4">
+        <p class="text-sm font-medium text-amber-950">No offline reference card matched "${esc(med.name)}" automatically. Use "Ask AI Assistant" below to look up full clinical, age, and allergy safety details.</p>
+      </div>
+    `;
+
+  openModal({
+    title: `Drug Info & Safety — ${med.name}`,
+    triggerEl,
+    bodyHtml: `
+      ${infoHtml}
+      <p class="text-xs text-ink/80 border-t border-black/10 pt-3">${esc(DISCLAIMER)}</p>
+      <div class="flex flex-wrap gap-2 pt-1">
+        ${
+          ref
+            ? `<button type="button" id="speak-drug-info" class="touch-target px-4 py-2 rounded-lg border border-black/20 text-sm font-medium hover:bg-black/5">Read Safety Info Aloud</button>`
+            : ''
+        }
+        <button type="button" id="ask-ai-med" class="touch-target px-4 py-2 rounded-lg bg-teal hover:bg-tealDark text-white text-sm font-semibold">Ask AI More About This Drug</button>
+      </div>
+    `,
+    onMount: (body) => {
+      const speakBtn = body.querySelector('#speak-drug-info');
+      if (speakBtn && ref) {
+        speakBtn.addEventListener('click', () => {
+          speakText(
+            `${med.name}. ${ref.whatItTreats}. Allergies and who should not take it: ${ref.allergiesAndAvoid}. Children: ${ref.ageGuidance.infantsChildren}. Pregnancy: ${ref.ageGuidance.pregnancyBreastfeeding}`,
+          );
+        });
+      }
+      body.querySelector('#ask-ai-med').addEventListener('click', () => {
+        closeModal();
+        state.aiPrompt = `Tell me about ${med.name}: what it treats, dosing guidance across ages, and allergies/who should not take it.`;
+        switchTab('ai', { moveFocus: true });
+        runAiQuestion(state.aiPrompt, med);
+      });
+    },
   });
 }
 
 // ---------------------------------------------------------
-// SELL tab
+// Cart Operations (Surgical DOM Update — Preserves Search Focus!)
 // ---------------------------------------------------------
-function renderSell() {
-  const categories = ['All', ...new Set(state.medications.map(m => m.category))];
-  const filtered = state.medications.filter(m => {
-    const matchesSearch = m.name.toLowerCase().includes(state.search.toLowerCase());
-    const matchesCat = state.category === 'All' || m.category === state.category;
-    return matchesSearch && matchesCat;
-  });
+function addToCart({ id, name, qtyType, unitPrice }) {
+  const existing = state.cart.find((i) => i.medication_id === id && i.qty_type === qtyType);
+  if (existing) existing.quantity += 1;
+  else {
+    state.cart.push({
+      medication_id: id,
+      name,
+      qty_type: qtyType,
+      unit_price: Number(unitPrice),
+      quantity: 1,
+    });
+  }
+  announce(`Added ${name} ${qtyType} ${money(unitPrice)} to current sale`);
+  if (state.tab === 'sell' && !state.viewingReceipt) updateCartPanel();
+}
+
+function updateCartPanel() {
+  const cartPanel = document.getElementById('cart-panel');
+  if (!cartPanel) return;
 
   const cartTotal = state.cart.reduce((sum, i) => sum + i.unit_price * i.quantity, 0);
-
-  renderShell(`
-    <div class="grid md:grid-cols-3 gap-6">
-      <div class="md:col-span-2">
-        <div class="flex flex-col sm:flex-row gap-2 mb-4">
-          <input id="search" placeholder="Search a medicine…" value="${state.search}"
-            class="flex-1 border border-black/10 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-teal" />
-          <select id="category" class="border border-black/10 rounded-lg px-3 py-2 bg-white">
-            ${categories.map(c => `<option value="${c}" ${c === state.category ? 'selected' : ''}>${c}</option>`).join('')}
-          </select>
-        </div>
-        <div class="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
-          ${filtered.length === 0 ? `<p class="text-ink/50 text-sm py-8 text-center">No medicine matches that search.</p>` : ''}
-          ${filtered.map(m => `
-            <div class="bg-white border border-black/5 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p class="font-medium">${m.name}</p>
-                <p class="text-xs text-ink/50">${m.category}</p>
-              </div>
-              <div class="flex gap-2 flex-wrap">
-                ${['packet','box','card','bottle','tube','counting'].map(qt => {
-                  const price = m['price_' + qt];
-                  if (price === null || price === undefined) return '';
-                  return `<button class="add-btn text-sm border border-teal text-teal rounded-lg px-3 py-1.5 hover:bg-teal hover:text-white transition"
-                    data-id="${m.id}" data-name="${m.name.replace(/"/g, '&quot;')}" data-type="${qt}" data-price="${price}">
-                    ${qt.charAt(0).toUpperCase() + qt.slice(1)} · ${money(price)}
-                  </button>`;
-                }).join('') || `<span class="text-xs text-ink/40 italic">no price set yet</span>`}
-              </div>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-
-      <div>
-        <div class="bg-white border border-black/5 rounded-xl p-4 sticky top-4">
-          <h2 class="font-display text-lg mb-3">Current sale</h2>
-          ${state.cart.length === 0 ? `<p class="text-sm text-ink/50">Tap a price above to add it here.</p>` : ''}
-          <div class="space-y-2 mb-3">
-            ${state.cart.map((item, idx) => `
-              <div class="flex items-center justify-between text-sm gap-2">
-                <div class="flex-1">
-                  <p class="font-medium">${item.name}</p>
-                  <p class="text-xs text-ink/50">${item.qty_type} · ${money(item.unit_price)}</p>
-                </div>
-                <div class="flex items-center gap-1">
-                  <button data-idx="${idx}" class="qty-btn w-6 h-6 rounded bg-black/5 hover:bg-black/10" data-dir="-1">–</button>
-                  <span class="w-5 text-center">${item.quantity}</span>
-                  <button data-idx="${idx}" class="qty-btn w-6 h-6 rounded bg-black/5 hover:bg-black/10" data-dir="1">+</button>
-                  <button data-idx="${idx}" class="remove-btn text-clay text-xs ml-1">✕</button>
-                </div>
-              </div>
-            `).join('')}
-          </div>
-          <div class="border-t border-black/10 pt-3 flex justify-between font-medium">
-            <span>Total</span><span>${money(cartTotal)}</span>
-          </div>
-          <button id="checkout-btn" ${state.cart.length === 0 ? 'disabled' : ''}
-            class="w-full mt-4 bg-teal hover:bg-tealDark disabled:opacity-40 disabled:hover:bg-teal text-white rounded-lg py-2 font-medium transition">
-            Complete sale & print receipt
-          </button>
-        </div>
-      </div>
-    </div>
-  `);
-
-  document.getElementById('search').addEventListener('input', (e) => { state.search = e.target.value; renderSell(); });
-  document.getElementById('search').focus();
-  document.getElementById('search').selectionStart = document.getElementById('search').value.length;
-  document.getElementById('category').addEventListener('change', (e) => { state.category = e.target.value; renderSell(); });
-
-  document.querySelectorAll('.add-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const { id, name, type, price } = btn.dataset;
-      const existing = state.cart.find(i => i.medication_id === id && i.qty_type === type);
-      if (existing) existing.quantity += 1;
-      else state.cart.push({ medication_id: id, name, qty_type: type, unit_price: Number(price), quantity: 1 });
-      renderSell();
-    });
+  const medById = new Map(state.medications.map((m) => [m.id, m]));
+  const belowCostItems = state.cart.filter((i) => {
+    const m = medById.get(i.medication_id);
+    return m && isBelowCost(i.unit_price, m.last_buy_unit_price);
   });
 
-  document.querySelectorAll('.qty-btn').forEach(btn => {
+  cartPanel.innerHTML = `
+    <div class="flex items-center justify-between gap-2 mb-3">
+      <h3 class="font-display text-lg font-semibold">Current Sale</h3>
+      ${
+        state.cart.length > 0
+          ? `<button type="button" id="clear-cart-btn" class="touch-target px-2.5 py-1 text-xs font-semibold text-clay rounded-lg hover:bg-clay/10">Clear</button>`
+          : ''
+      }
+    </div>
+    ${state.cart.length === 0 ? `<p class="text-sm text-ink/75">Tap any unit price to add an item here.</p>` : ''}
+    <div class="space-y-3 mb-4">
+      ${state.cart
+        .map((item, idx) => {
+          const m = medById.get(item.medication_id);
+          const below = m && isBelowCost(item.unit_price, m.last_buy_unit_price);
+          return `
+            <div class="flex items-center justify-between text-sm gap-2 pb-2 border-b border-black/10">
+              <div class="flex-1 min-w-0">
+                <p class="font-semibold truncate">${esc(item.name)}</p>
+                <p class="text-xs text-ink/80">${esc(item.qty_type)} · ${esc(money(item.unit_price))}</p>
+                ${
+                  below
+                    ? `<p class="text-xs font-bold text-red-700 mt-0.5">⚠ At or below buy cost (${esc(money(m.last_buy_unit_price))})</p>`
+                    : ''
+                }
+              </div>
+              <div class="flex items-center gap-1">
+                <button type="button" data-idx="${idx}" data-dir="-1"
+                  class="qty-btn touch-target rounded-lg bg-black/5 hover:bg-black/15 font-bold border border-black/10"
+                  aria-label="Decrease quantity of ${esc(item.name)}">–</button>
+                <span class="w-7 text-center font-semibold" aria-live="polite">${item.quantity}</span>
+                <button type="button" data-idx="${idx}" data-dir="1"
+                  class="qty-btn touch-target rounded-lg bg-black/5 hover:bg-black/15 font-bold border border-black/10"
+                  aria-label="Increase quantity of ${esc(item.name)}">+</button>
+                <button type="button" data-idx="${idx}"
+                  class="remove-btn touch-target rounded-lg text-clay hover:bg-clay/10 font-bold border border-transparent"
+                  aria-label="Remove ${esc(item.name)} from sale">✕</button>
+              </div>
+            </div>`;
+        })
+        .join('')}
+    </div>
+    ${
+      belowCostItems.length > 0
+        ? `<div role="alert" class="mb-3 rounded-lg bg-red-50 border border-red-300 px-3 py-2 text-xs font-semibold text-red-900">
+            Uncle's Rule Check: ${belowCostItems.length} item(s) priced at or below recorded purchase cost!
+          </div>`
+        : ''
+    }
+    <div class="border-t border-black/15 pt-3 flex justify-between items-center font-semibold text-base">
+      <span>Total</span><span class="text-tealDark font-bold">${esc(money(cartTotal))}</span>
+    </div>
+    <div class="space-y-2 mt-4">
+      <button type="button" id="checkout-btn" ${state.cart.length === 0 ? 'disabled' : ''}
+        class="touch-target w-full bg-teal hover:bg-tealDark disabled:opacity-40 text-white rounded-lg py-2.5 px-4 font-semibold transition">
+        Complete Sale &amp; Print Receipt
+      </button>
+      ${
+        state.cart.length > 0
+          ? `<button type="button" id="speak-cart-btn" class="touch-target w-full border border-black/20 rounded-lg py-2 px-3 text-sm font-medium hover:bg-black/5">
+              Read Total Aloud
+            </button>`
+          : ''
+      }
+    </div>
+  `;
+
+  cartPanel.querySelector('#clear-cart-btn')?.addEventListener('click', () => {
+    state.cart = [];
+    updateCartPanel();
+    announce('Cleared current sale');
+  });
+
+  cartPanel.querySelectorAll('.qty-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       const idx = Number(btn.dataset.idx);
       const dir = Number(btn.dataset.dir);
+      if (!state.cart[idx]) return;
       state.cart[idx].quantity = Math.max(1, state.cart[idx].quantity + dir);
-      renderSell();
-    });
-  });
-  document.querySelectorAll('.remove-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      state.cart.splice(Number(btn.dataset.idx), 1);
-      renderSell();
+      updateCartPanel();
     });
   });
 
-  const checkoutBtn = document.getElementById('checkout-btn');
-  if (checkoutBtn) checkoutBtn.addEventListener('click', completeSale);
+  cartPanel.querySelectorAll('.remove-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = Number(btn.dataset.idx);
+      const removed = state.cart.splice(idx, 1)[0];
+      updateCartPanel();
+      if (removed) announce(`Removed ${removed.name}`);
+    });
+  });
+
+  cartPanel.querySelector('#speak-cart-btn')?.addEventListener('click', () => {
+    const itemsText = state.cart.map((i) => `${i.quantity} ${i.name}`).join(', ');
+    speakText(`Current sale total is ${Math.round(cartTotal)} Naira for ${itemsText}`);
+  });
+
+  cartPanel.querySelector('#checkout-btn')?.addEventListener('click', completeSale);
 }
 
 async function completeSale() {
+  if (state.cart.length === 0) return;
   const total = state.cart.reduce((sum, i) => sum + i.unit_price * i.quantity, 0);
-  const { data: sale, error } = await supabase.from('sales').insert({
-    sold_by: state.session.user.id,
-    sold_by_email: state.session.user.email,
-    total,
-  }).select().single();
+  const btn = document.getElementById('checkout-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Saving sale…';
+  }
 
-  if (error) { alert('Could not save the sale: ' + error.message); return; }
+  const { data: sale, error } = await supabase
+    .from('sales')
+    .insert({
+      sold_by: state.session.user.id,
+      sold_by_email: state.session.user.email,
+      total,
+    })
+    .select()
+    .single();
 
-  const items = state.cart.map(i => ({
+  if (error) {
+    showToast('Could not save the sale: ' + error.message, 'error');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Complete Sale & Print Receipt';
+    }
+    return;
+  }
+
+  const items = state.cart.map((i) => ({
     sale_id: sale.id,
     medication_id: i.medication_id,
     medication_name: i.name,
@@ -247,257 +903,2018 @@ async function completeSale() {
     quantity: i.quantity,
     subtotal: i.unit_price * i.quantity,
   }));
+
   const { error: itemsError } = await supabase.from('sale_items').insert(items);
-  if (itemsError) { alert('Could not save the receipt items: ' + itemsError.message); return; }
+  if (itemsError) {
+    showToast('Could not save receipt items: ' + itemsError.message, 'error');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Complete Sale & Print Receipt';
+    }
+    return;
+  }
 
   state.lastReceipt = { sale, items };
   state.cart = [];
-  renderReceipt();
+  state.viewingReceipt = true;
+  await Promise.all([loadMedications(), loadSalesAndItems()]);
+  refreshTabBar();
+  renderReceiptView();
+  showToast('Sale saved! Receipt ready to print.', 'success');
 }
 
-function renderReceipt() {
-  const { sale, items } = state.lastReceipt;
-  renderShell(`
-    <div id="receipt-print" class="bg-white border border-black/5 rounded-xl p-6 max-w-md mx-auto">
-      <h2 class="font-display text-xl text-center mb-1">Receipt</h2>
-      <p class="text-xs text-center text-ink/50 mb-4">${new Date(sale.created_at).toLocaleString()}</p>
-      <div class="space-y-1 text-sm mb-4">
-        ${items.map(i => `
-          <div class="flex justify-between">
-            <span>${i.medication_name} (${i.qty_type}) × ${i.quantity}</span>
-            <span>${money(i.subtotal)}</span>
-          </div>
-        `).join('')}
+function renderReceiptView() {
+  const { sale, items } = state.lastReceipt || {};
+  if (!sale) return switchTab('sell');
+  document.body.dataset.printTarget = 'receipt';
+  const panel = document.getElementById('tab-panel');
+  panel.innerHTML = `
+    <div id="receipt-print" class="card-surface bg-white border border-black/15 rounded-xl p-6 max-w-md mx-auto">
+      <h2 class="font-display text-xl text-center font-semibold mb-1">Pharmacy Receipt</h2>
+      <p class="text-xs text-center text-ink/75 mb-4">${esc(new Date(sale.created_at).toLocaleString())}</p>
+      <div class="space-y-1.5 text-sm mb-4">
+        ${items
+          .map(
+            (i) => `
+          <div class="flex justify-between gap-2">
+            <span>${esc(i.medication_name)} (${esc(i.qty_type)}) × ${i.quantity}</span>
+            <span class="font-medium">${esc(money(i.subtotal))}</span>
+          </div>`,
+          )
+          .join('')}
       </div>
-      <div class="border-t border-black/10 pt-2 flex justify-between font-medium">
-        <span>Total</span><span>${money(sale.total)}</span>
+      <div class="border-t border-black/15 pt-3 flex justify-between font-bold text-base">
+        <span>Total</span><span>${esc(money(sale.total))}</span>
       </div>
-      <p class="text-xs text-center text-ink/40 mt-4">Served by ${sale.sold_by_email}</p>
+      <p class="text-xs text-center text-ink/75 mt-4">Served by ${esc(sale.sold_by_email)}</p>
     </div>
-    <div class="no-print flex gap-3 justify-center mt-6">
-      <button id="print-btn" class="bg-teal hover:bg-tealDark text-white rounded-lg px-4 py-2 font-medium">Print</button>
-      <button id="new-sale-btn" class="border border-teal text-teal rounded-lg px-4 py-2 font-medium">New sale</button>
+    <div class="no-print flex flex-wrap gap-3 justify-center mt-6">
+      <button type="button" id="print-btn" class="touch-target bg-teal hover:bg-tealDark text-white rounded-lg px-5 py-2.5 font-semibold">Print Receipt</button>
+      <button type="button" id="new-sale-btn" class="touch-target border border-teal text-tealDark rounded-lg px-5 py-2.5 font-semibold hover:bg-teal/5">New Sale</button>
     </div>
-  `);
-  document.getElementById('print-btn').addEventListener('click', () => window.print());
-  document.getElementById('new-sale-btn').addEventListener('click', () => { state.tab = 'sell'; renderSell(); });
+  `;
+  document.getElementById('print-btn').addEventListener('click', () => {
+    document.body.dataset.printTarget = 'receipt';
+    window.print();
+  });
+  document.getElementById('new-sale-btn').addEventListener('click', () => switchTab('sell', { moveFocus: true }));
 }
 
 // ---------------------------------------------------------
-// HISTORY tab
+// TAB 1: SELL (Zero Focus Loss, Fuzzy Search, Cost Privacy)
 // ---------------------------------------------------------
-async function renderHistory() {
-  const { data: sales } = await supabase.from('sales').select('*').order('created_at', { ascending: false }).limit(100);
-  const { data: items } = await supabase.from('sale_items').select('*');
-  const itemsBySale = {};
-  (items || []).forEach(i => { (itemsBySale[i.sale_id] ||= []).push(i); });
+function getAllCompaniesList() {
+  const set = new Set();
+  state.medications.forEach((m) => {
+    const meta = inferGenericAndCompany(m);
+    if (meta.company) set.add(meta.company);
+  });
+  return ['All', ...[...set].sort((a, b) => a.localeCompare(b))];
+}
 
-  renderShell(`
-    <div class="space-y-3">
-      <h2 class="font-display text-lg mb-2">All sales</h2>
-      ${(sales || []).length === 0 ? `<p class="text-sm text-ink/50">No sales recorded yet.</p>` : ''}
-      ${(sales || []).map(s => `
-        <div class="bg-white border border-black/5 rounded-xl p-4">
-          <div class="flex justify-between items-start mb-2">
-            <div>
-              <p class="text-xs text-ink/50">${new Date(s.created_at).toLocaleString()}</p>
-              <p class="text-xs text-ink/50">Served by ${s.sold_by_email}</p>
+function updateSellResults() {
+  const resultsEl = document.getElementById('med-results');
+  const countEl = document.getElementById('med-count');
+  if (!resultsEl || !countEl) return;
+
+  const q = state.sellSearch.trim();
+  const brandCountByGeneric = new Map();
+  state.medications.forEach((m) => {
+    const g = inferGenericAndCompany(m).generic;
+    if (g) {
+      const k = g.toLowerCase();
+      brandCountByGeneric.set(k, (brandCountByGeneric.get(k) || 0) + 1);
+    }
+  });
+
+  const scored = state.medications
+    .map((m) => {
+      const meta = inferGenericAndCompany(m);
+      if (state.sellCategory !== 'All' && m.category !== state.sellCategory) return null;
+      if (state.sellCompany !== 'All' && meta.company !== state.sellCompany) return null;
+      const score = q ? fuzzyScore(q, m) : 1;
+      if (q && score < 55) return null;
+      return { med: m, meta, score };
+    })
+    .filter(Boolean);
+
+  if (q) {
+    scored.sort((a, b) => b.score - a.score || a.med.name.localeCompare(b.med.name));
+  }
+
+  countEl.textContent = `Showing ${scored.length} of ${state.medications.length} medicines`;
+
+  if (scored.length === 0) {
+    resultsEl.innerHTML = `
+      <div class="card-surface bg-white border border-black/10 rounded-xl p-8 text-center space-y-3">
+        <p class="text-sm font-medium text-ink/80">No shelf medicine matched "${esc(q)}".</p>
+        <button type="button" id="sell-ask-ai-fallback" class="touch-target px-4 py-2 rounded-lg bg-teal text-white text-sm font-semibold hover:bg-tealDark">
+          Ask AI Assistant about "${esc(q)}"
+        </button>
+      </div>
+    `;
+    resultsEl.querySelector('#sell-ask-ai-fallback')?.addEventListener('click', () => {
+      state.aiPrompt = q;
+      switchTab('ai', { moveFocus: true });
+      runAiQuestion(q);
+    });
+    return;
+  }
+
+  resultsEl.innerHTML = scored
+    .map(({ med: m, meta }) => {
+      const prices = getAllAvailablePrices(m);
+      const noPrices = prices.length === 0;
+      const sameDrugCount = meta.generic ? brandCountByGeneric.get(meta.generic.toLowerCase()) || 1 : 1;
+      const hasBuyCost = m.last_buy_unit_price !== null && m.last_buy_unit_price !== undefined;
+      const showCostBox = state.a11y.showCost || noPrices;
+
+      let stockBadge = `<span class="text-xs font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-800">Stock not tracked</span>`;
+      if (m.stock_qty !== null && m.stock_qty !== undefined) {
+        if (m.stock_qty === 0) {
+          stockBadge = `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-900">Out of stock</span>`;
+        } else if (m.stock_qty <= (m.reorder_level ?? 5)) {
+          stockBadge = `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900">Low: ${m.stock_qty} ${esc(m.stock_unit || 'unit')}</span>`;
+        } else {
+          stockBadge = `<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900">In stock: ${m.stock_qty}</span>`;
+        }
+      }
+
+      let costHelperHtml = '';
+      if (showCostBox) {
+        if (hasBuyCost) {
+          const calc = calculateSellingPriceOptions(m.last_buy_unit_price, m.default_markup_pct ?? 25);
+          const rec25 = calc.options.find((o) => o.pct === 25) || calc.options[0];
+          const anyBelow = prices.some((p) => isBelowCost(p.unitPrice, m.last_buy_unit_price));
+          costHelperHtml = `
+            <div class="mt-3 pt-3 border-t border-black/10 text-xs space-y-1.5 ${anyBelow ? 'bg-red-50 -mx-2 px-3 py-2 rounded-lg border border-red-300' : ''}">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <span>
+                  <strong>Last Buy Cost:</strong> ${esc(money(m.last_buy_unit_price))}
+                  ${m.last_buy_pack_label ? `(${esc(m.last_buy_pack_label)})` : ''}
+                  · <strong>Safe +25% Sell:</strong> ${esc(money(rec25?.price || calc.minProfitPrice))}
+                </span>
+                <button type="button" class="prefill-suggest-btn touch-target px-2.5 py-1 rounded-lg border border-teal text-tealDark font-semibold hover:bg-teal hover:text-white"
+                  data-id="${esc(m.id)}" data-rec="${rec25?.price || ''}">
+                  ${isOwner() ? 'Set Sell Price' : 'Suggest Sell Price'}
+                </button>
+              </div>
+              ${
+                anyBelow
+                  ? `<p class="font-bold text-red-800">⚠ Warning: A selling price on this card is AT OR BELOW Uncle's buy cost (${esc(money(m.last_buy_unit_price))})!</p>`
+                  : ''
+              }
+            </div>`;
+        } else if (noPrices) {
+          costHelperHtml = `
+            <div class="mt-3 pt-3 border-t border-black/10 text-xs flex flex-wrap items-center justify-between gap-2">
+              <span class="text-amber-900 font-medium">No selling price or Purchase Book buy cost yet.</span>
+              <button type="button" class="log-buy-btn touch-target px-2.5 py-1 rounded-lg border border-amber-700 text-amber-900 font-semibold hover:bg-amber-50"
+                data-id="${esc(m.id)}">
+                Log Buy Cost in Purchase Book
+              </button>
+            </div>`;
+        }
+      }
+
+      return `
+        <article class="card-surface bg-white border border-black/10 rounded-xl p-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="space-y-1">
+              <h3 class="font-semibold text-base">${esc(m.name)}</h3>
+              <div class="flex flex-wrap items-center gap-1.5 text-xs">
+                <span class="px-2 py-0.5 rounded-full bg-black/5 font-medium">${esc(m.category)}</span>
+                ${meta.company ? `<span class="px-2 py-0.5 rounded-full bg-teal/10 text-tealDark font-semibold">${esc(meta.company)}</span>` : ''}
+                ${meta.generic ? `<span class="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-900 font-medium">${esc(meta.generic)}</span>` : ''}
+                ${stockBadge}
+              </div>
             </div>
-            <p class="font-medium">${money(s.total)}</p>
+            <div class="flex flex-wrap gap-2">
+              ${
+                sameDrugCount > 1
+                  ? `<button type="button" class="compare-btn touch-target px-3 py-1.5 rounded-lg border border-teal/40 text-tealDark text-xs font-semibold hover:bg-teal/10" data-id="${esc(m.id)}">
+                      Compare ${sameDrugCount} brands
+                    </button>`
+                  : ''
+              }
+              <button type="button" class="info-btn touch-target px-3 py-1.5 rounded-lg border border-black/20 text-xs font-semibold hover:bg-black/5" data-id="${esc(m.id)}">
+                Drug Info &amp; Safety
+              </button>
+            </div>
           </div>
-          <div class="text-sm text-ink/70 space-y-0.5">
-            ${(itemsBySale[s.id] || []).map(i => `<div class="flex justify-between"><span>${i.medication_name} (${i.qty_type}) × ${i.quantity}</span><span>${money(i.subtotal)}</span></div>`).join('')}
+
+          <div class="flex gap-2 flex-wrap mt-3">
+            ${
+              prices
+                .map((p) => {
+                  const below = hasBuyCost && isBelowCost(p.unitPrice, m.last_buy_unit_price);
+                  const label = p.qtyType.charAt(0).toUpperCase() + p.qtyType.slice(1);
+                  return `
+                    <button type="button"
+                      class="add-btn touch-target text-sm font-semibold rounded-lg px-3.5 py-2 border transition ${
+                        below
+                          ? 'border-red-700 text-red-800 bg-red-50 hover:bg-red-700 hover:text-white'
+                          : 'border-teal text-tealDark hover:bg-teal hover:text-white'
+                      }"
+                      data-id="${esc(m.id)}"
+                      data-name="${esc(m.name)}"
+                      data-type="${esc(p.qtyType)}"
+                      data-price="${p.unitPrice}"
+                      aria-label="Add ${esc(m.name)} ${esc(label)} ${esc(money(p.unitPrice))} to current sale">
+                      ${esc(label)} · ${esc(money(p.unitPrice))}
+                    </button>`;
+                })
+                .join('') || `<span class="text-sm text-ink/75 italic">No selling price set yet</span>`
+            }
+          </div>
+          ${costHelperHtml}
+        </article>`;
+    })
+    .join('');
+
+  resultsEl.querySelectorAll('.add-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      addToCart({
+        id: btn.dataset.id,
+        name: btn.dataset.name,
+        qtyType: btn.dataset.type,
+        unitPrice: Number(btn.dataset.price),
+      });
+    });
+  });
+
+  resultsEl.querySelectorAll('.compare-btn').forEach((btn) => {
+    btn.addEventListener('click', () => openBrandComparisonModal(btn.dataset.id, btn));
+  });
+
+  resultsEl.querySelectorAll('.info-btn').forEach((btn) => {
+    btn.addEventListener('click', () => openDrugInfoModal(btn.dataset.id, btn));
+  });
+
+  resultsEl.querySelectorAll('.log-buy-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.pbSelectedMedId = btn.dataset.id;
+      switchTab('purchase', { moveFocus: true });
+    });
+  });
+
+  resultsEl.querySelectorAll('.prefill-suggest-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const medId = btn.dataset.id;
+      const rec = btn.dataset.rec;
+      if (isOwner()) {
+        const med = state.medications.find((m) => m.id === medId);
+        state.adminSearch = med?.name || '';
+        switchTab('admin', { moveFocus: true });
+      } else {
+        state.suggestionDraft = { type: 'price_change', medicationId: medId, suggestedPrice: rec };
+        switchTab('suggestions', { moveFocus: true });
+      }
+    });
+  });
+}
+
+function renderSellTab() {
+  const categories = ['All', ...new Set(state.medications.map((m) => m.category)).values()];
+  const companies = getAllCompaniesList();
+  const panel = document.getElementById('tab-panel');
+
+  panel.innerHTML = `
+    <div class="grid lg:grid-cols-3 gap-6 items-start">
+      <section class="lg:col-span-2 space-y-4" aria-labelledby="sell-heading">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <h2 id="sell-heading" class="font-display text-xl font-semibold text-tealDark">Counter Price Lookup</h2>
+          <label class="touch-target inline-flex items-center gap-2 text-xs font-semibold px-3 py-1.5 rounded-lg border border-black/15 bg-white cursor-pointer">
+            <input id="sell-cost-toggle" type="checkbox" ${state.a11y.showCost ? 'checked' : ''} class="w-4 h-4 accent-teal" />
+            Show Uncle's Buy Cost (Alt+C)
+          </label>
+        </div>
+
+        <div class="card-surface bg-white border border-black/10 rounded-xl p-4 space-y-3">
+          <div class="grid sm:grid-cols-12 gap-3">
+            <div class="sm:col-span-6">
+              <label for="search" class="block text-xs font-semibold mb-1">Search medicine, symptom, or company</label>
+              <div class="flex gap-1.5">
+                <input id="search" type="search" value="${esc(state.sellSearch)}"
+                  placeholder="e.g. Amoxil, malaria, bp, Berlin…"
+                  class="touch-target flex-1 border border-black/20 rounded-lg px-3 py-2 bg-white" />
+                ${
+                  supportsVoiceRecognition()
+                    ? `<button type="button" id="sell-voice-btn" class="touch-target px-3 py-2 rounded-lg border border-black/20 text-xs font-semibold hover:bg-black/5" aria-label="Voice search">🎤</button>`
+                    : ''
+                }
+              </div>
+            </div>
+            <div class="sm:col-span-3">
+              <label for="category" class="block text-xs font-semibold mb-1">Category</label>
+              <select id="category" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white">
+                ${categories.map((c) => `<option value="${esc(c)}" ${c === state.sellCategory ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="sm:col-span-3">
+              <label for="company-filter" class="block text-xs font-semibold mb-1">Company / Brand</label>
+              <select id="company-filter" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white">
+                ${companies.map((c) => `<option value="${esc(c)}" ${c === state.sellCompany ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <p id="med-count" class="text-xs font-medium text-ink/75" aria-live="polite"></p>
+        </div>
+
+        <div id="med-results" class="space-y-3 max-h-[65vh] overflow-y-auto pr-1"></div>
+      </section>
+
+      <aside id="cart-panel" class="card-surface bg-white border border-black/10 rounded-xl p-4 sticky top-4" aria-label="Current Sale Cart"></aside>
+    </div>
+  `;
+
+  const searchInput = document.getElementById('search');
+  searchInput.addEventListener('input', (e) => {
+    state.sellSearch = e.target.value;
+    updateSellResults();
+  });
+
+  document.getElementById('sell-voice-btn')?.addEventListener('click', (e) => {
+    startVoiceInput((text) => {
+      state.sellSearch = text;
+      searchInput.value = text;
+      updateSellResults();
+      announce(`Searched for ${text}`);
+    }, e.currentTarget);
+  });
+
+  document.getElementById('category').addEventListener('change', (e) => {
+    state.sellCategory = e.target.value;
+    updateSellResults();
+  });
+
+  document.getElementById('company-filter').addEventListener('change', (e) => {
+    state.sellCompany = e.target.value;
+    updateSellResults();
+  });
+
+  document.getElementById('sell-cost-toggle').addEventListener('change', (e) => {
+    state.a11y.showCost = e.target.checked;
+    updateA11yButtons();
+    updateSellResults();
+  });
+
+  updateSellResults();
+  updateCartPanel();
+}
+
+// ---------------------------------------------------------
+// TAB 2: PURCHASE BOOK (Digital Ledger Replacing Physical Book)
+// ---------------------------------------------------------
+function updatePurchaseResults() {
+  const resultsEl = document.getElementById('purchase-results');
+  const summaryEl = document.getElementById('pb-summary');
+  if (!resultsEl) return;
+
+  const q = state.pbSearch.trim();
+  const filtered = state.purchaseEntries.filter((p) => {
+    if (state.pbCompany !== 'All' && (p.company || 'Unlabeled') !== state.pbCompany) return false;
+    if (!q) return true;
+    const hay = `${p.medication_name} ${p.company || ''} ${p.generic_name || ''} ${p.supplier || ''} ${p.pack_description || ''}`;
+    return fuzzyScore(q, hay) >= 55;
+  });
+
+  if (summaryEl) {
+    const totalSpend = filtered.reduce((s, p) => s + Number(p.total_cost || 0), 0);
+    summaryEl.textContent = `${filtered.length} recorded purchase(s) · Total logged spend: ${money(totalSpend)}`;
+  }
+
+  if (filtered.length === 0) {
+    resultsEl.innerHTML = `
+      <div class="card-surface bg-white border border-black/10 rounded-xl p-6 text-center text-sm text-ink/75">
+        No Purchase Book entries match yet. Use the form to log Uncle's pack rate &amp; single unit buy cost — never flip physical pages again!
+      </div>`;
+    return;
+  }
+
+  // Group previous entries by medication name to compute price trend vs prior buy
+  const byMed = new Map();
+  state.purchaseEntries.forEach((p) => {
+    const k = p.medication_id || p.medication_name.toLowerCase();
+    if (!byMed.has(k)) byMed.set(k, []);
+    byMed.get(k).push(p);
+  });
+
+  const nowMs = Date.now();
+  resultsEl.innerHTML = filtered
+    .map((p) => {
+      const history = byMed.get(p.medication_id || p.medication_name.toLowerCase()) || [];
+      const idx = history.findIndex((x) => x.id === p.id);
+      const prev = idx >= 0 ? history[idx + 1] : null;
+      let trendBadge = '';
+      if (prev) {
+        const diff = Number(p.unit_buy_price) - Number(prev.unit_buy_price);
+        if (diff > 0) {
+          trendBadge = `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-900">↑ +${esc(money(diff))} vs prev</span>`;
+        } else if (diff < 0) {
+          trendBadge = `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900">↓ -${esc(money(Math.abs(diff)))} vs prev</span>`;
+        } else {
+          trendBadge = `<span class="text-xs font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-800">Same rate</span>`;
+        }
+      }
+
+      let expiryBadge = '';
+      if (p.expiry_date) {
+        const expDays = (new Date(p.expiry_date).getTime() - nowMs) / 86400000;
+        if (expDays <= 0) {
+          expiryBadge = `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-900">Expired ${esc(p.expiry_date)}</span>`;
+        } else if (expDays <= 60) {
+          expiryBadge = `<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900">Expires soon: ${esc(p.expiry_date)}</span>`;
+        } else {
+          expiryBadge = `<span class="text-xs px-2 py-0.5 rounded-full bg-black/5">Exp: ${esc(p.expiry_date)}</span>`;
+        }
+      }
+
+      const calc = calculateSellingPriceOptions(p.unit_buy_price, 25);
+      const rec25 = calc.options.find((o) => o.pct === 25) || calc.options[0];
+
+      return `
+        <article class="card-surface bg-white border border-black/10 rounded-xl p-4 space-y-2">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h3 class="font-semibold text-base">${esc(p.medication_name)}</h3>
+              <p class="text-xs text-ink/80">
+                ${p.company ? `Company: <strong>${esc(p.company)}</strong> · ` : ''}
+                ${p.supplier ? `Supplier: ${esc(p.supplier)} · ` : ''}
+                Date: ${esc(p.purchased_at)}
+              </p>
+            </div>
+            <div class="text-right">
+              <p class="text-base font-bold text-tealDark">${esc(money(p.unit_buy_price))} <span class="text-xs font-normal">/ ${esc(p.unit_type)}</span></p>
+              <p class="text-xs text-ink/80">${esc(p.pack_description)} · Total ${esc(money(p.total_cost))}</p>
+            </div>
+          </div>
+          <div class="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <div class="flex flex-wrap items-center gap-1.5">
+              ${trendBadge}
+              ${expiryBadge}
+              <span class="text-xs px-2 py-0.5 rounded-full bg-teal/10 text-tealDark font-medium">
+                Safe +25% sell: ${esc(money(rec25?.price || p.unit_buy_price))}
+              </span>
+            </div>
+            ${
+              isOwner()
+                ? `<button type="button" class="pb-del-btn touch-target px-3 py-1 rounded-lg border border-red-300 text-xs font-semibold text-red-800 hover:bg-red-50" data-id="${esc(p.id)}" data-name="${esc(p.medication_name)}">Delete</button>`
+                : ''
+            }
+          </div>
+          ${p.notes ? `<p class="text-xs italic text-ink/75">"${esc(p.notes)}"</p>` : ''}
+        </article>`;
+    })
+    .join('');
+
+  resultsEl.querySelectorAll('.pb-del-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ok = await confirmModal({
+        title: 'Delete Purchase Entry?',
+        message: `Remove this purchase log for ${btn.dataset.name}? Stock totals already applied will remain unless adjusted in Restock.`,
+        confirmLabel: 'Delete Entry',
+        danger: true,
+        triggerEl: btn,
+      });
+      if (!ok) return;
+      const { error } = await supabase.from('purchase_entries').delete().eq('id', btn.dataset.id);
+      if (error) showToast('Could not delete entry: ' + error.message, 'error');
+      else {
+        await loadPurchaseEntries();
+        updatePurchaseResults();
+        showToast('Purchase entry removed.', 'info');
+      }
+    });
+  });
+}
+
+function renderPurchaseBookTab() {
+  const panel = document.getElementById('tab-panel');
+  const pbCompanies = ['All', ...new Set(state.purchaseEntries.map((p) => p.company || 'Unlabeled'))];
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  panel.innerHTML = `
+    <div class="grid lg:grid-cols-5 gap-6 items-start">
+      <section class="lg:col-span-2 card-surface bg-white border border-black/10 rounded-xl p-5" aria-labelledby="pb-form-heading">
+        <h2 id="pb-form-heading" class="font-display text-xl font-semibold text-tealDark mb-1">Log Purchase (Uncle's Book)</h2>
+        <p class="text-xs text-ink/80 mb-4">Record pack rate (e.g. 1 roll, 5 tins) and total paid — we compute single unit buy cost, update stock count, and suggest profitable retail prices.</p>
+
+        <form id="pb-form" class="space-y-3">
+          <div>
+            <label for="pb-med" class="block text-xs font-semibold mb-1">Medicine</label>
+            <select id="pb-med" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white">
+              <option value="">— New / unlisted medicine —</option>
+              ${state.medications
+                .map(
+                  (m) =>
+                    `<option value="${esc(m.id)}" ${m.id === state.pbSelectedMedId ? 'selected' : ''}>${esc(m.name)}</option>`,
+                )
+                .join('')}
+            </select>
+          </div>
+
+          <div id="pb-new-med-fields" class="grid sm:grid-cols-2 gap-2 ${state.pbSelectedMedId ? 'hidden' : ''}">
+            <div>
+              <label for="pb-new-name" class="block text-xs font-semibold mb-1">New medicine name</label>
+              <input id="pb-new-name" type="text" placeholder="e.g. Emzor Paracetamol" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+            <div>
+              <label for="pb-new-cat" class="block text-xs font-semibold mb-1">Category</label>
+              <input id="pb-new-cat" type="text" value="Other" placeholder="Pain Relief, Antibiotic…" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+          </div>
+
+          <div class="grid sm:grid-cols-2 gap-2">
+            <div>
+              <label for="pb-company" class="block text-xs font-semibold mb-1">Company / Brand</label>
+              <input id="pb-company" type="text" placeholder="e.g. Berlin, Teva, Tuyil" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+            <div>
+              <label for="pb-generic" class="block text-xs font-semibold mb-1">Active Ingredient</label>
+              <input id="pb-generic" type="text" placeholder="e.g. Amlodipine" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+          </div>
+
+          <div class="grid sm:grid-cols-2 gap-2">
+            <div>
+              <label for="pb-pack" class="block text-xs font-semibold mb-1">Pack / Bulk Description</label>
+              <input id="pb-pack" type="text" required placeholder="e.g. 1 roll, 5 tins, 2 cartons" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+            <div>
+              <label for="pb-supplier" class="block text-xs font-semibold mb-1">Supplier / Market (optional)</label>
+              <input id="pb-supplier" type="text" placeholder="e.g. Head Bridge / Distributor" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label for="pb-qty" class="block text-xs font-semibold mb-1">Units in Pack / Buy</label>
+              <input id="pb-qty" type="number" step="0.01" min="0.01" value="1" required class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+            <div>
+              <label for="pb-unit" class="block text-xs font-semibold mb-1">Unit Type</label>
+              <select id="pb-unit" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white">
+                ${UNIT_TYPES.map((u) => `<option value="${u}">${u.charAt(0).toUpperCase() + u.slice(1)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label for="pb-total-cost" class="block text-xs font-semibold mb-1">Total Paid (₦)</label>
+              <input id="pb-total-cost" type="number" step="0.01" min="0" required placeholder="e.g. 8500" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+            <div>
+              <label for="pb-unit-price" class="block text-xs font-semibold mb-1">Single Unit Cost (₦)</label>
+              <input id="pb-unit-price" type="number" step="0.01" min="0" required placeholder="Auto-calculated" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+          </div>
+
+          <div id="pb-sell-helper" class="rounded-xl bg-teal/5 border border-teal/25 p-3 text-xs space-y-2">
+            <p class="font-semibold text-tealDark">Enter Total Paid or Single Unit Cost to see safe selling prices.</p>
+          </div>
+
+          <div class="space-y-2">
+            <label class="inline-flex items-center gap-2 text-xs font-semibold cursor-pointer">
+              <input id="pb-apply-sell" type="checkbox" class="w-4 h-4 accent-teal" />
+              ${isOwner() ? 'Also update retail selling price for this unit' : 'Also send retail selling price suggestion to Owner'}
+            </label>
+            <div id="pb-sell-wrap" class="hidden">
+              <label for="pb-sell-price" class="block text-xs font-semibold mb-1">Retail Selling Price (₦)</label>
+              <input id="pb-sell-price" type="number" step="0.01" min="0" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+              <p id="pb-below-warn" class="text-xs font-bold text-red-700 mt-1 hidden"></p>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label for="pb-date" class="block text-xs font-semibold mb-1">Purchase Date</label>
+              <input id="pb-date" type="date" value="${todayStr}" required class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+            <div>
+              <label for="pb-expiry" class="block text-xs font-semibold mb-1">Expiry Date (optional)</label>
+              <input id="pb-expiry" type="date" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+          </div>
+
+          <div>
+            <label for="pb-notes" class="block text-xs font-semibold mb-1">Notes (optional)</label>
+            <input id="pb-notes" type="text" placeholder="Batch, promo deal, or price note" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+          </div>
+
+          <button type="submit" id="pb-submit-btn" class="touch-target w-full bg-teal hover:bg-tealDark text-white rounded-lg py-2.5 font-semibold transition">
+            Save to Purchase Book
+          </button>
+        </form>
+      </section>
+
+      <section class="lg:col-span-3 space-y-4" aria-labelledby="pb-ledger-heading">
+        <div class="card-surface bg-white border border-black/10 rounded-xl p-4 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <h2 id="pb-ledger-heading" class="font-display text-xl font-semibold text-tealDark">Digital Purchase Book</h2>
+            <span id="pb-summary" class="text-xs font-semibold text-ink/80"></span>
+          </div>
+          <div class="grid sm:grid-cols-3 gap-2">
+            <div class="sm:col-span-2">
+              <label for="pb-search" class="block text-xs font-semibold mb-1">Instant search (no flipping pages)</label>
+              <input id="pb-search" type="search" value="${esc(state.pbSearch)}" placeholder="Search medicine, supplier, company, or roll…"
+                class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+            <div>
+              <label for="pb-company-filter" class="block text-xs font-semibold mb-1">Company</label>
+              <select id="pb-company-filter" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white">
+                ${pbCompanies.map((c) => `<option value="${esc(c)}" ${c === state.pbCompany ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+              </select>
+            </div>
           </div>
         </div>
-      `).join('')}
+
+        <div id="purchase-results" class="space-y-3 max-h-[70vh] overflow-y-auto pr-1"></div>
+      </section>
     </div>
-  `);
+  `;
+
+  const medSelect = document.getElementById('pb-med');
+  const newMedFields = document.getElementById('pb-new-med-fields');
+  const compInput = document.getElementById('pb-company');
+  const genInput = document.getElementById('pb-generic');
+  const qtyInput = document.getElementById('pb-qty');
+  const unitSelect = document.getElementById('pb-unit');
+  const totalInput = document.getElementById('pb-total-cost');
+  const unitPriceInput = document.getElementById('pb-unit-price');
+  const helperEl = document.getElementById('pb-sell-helper');
+  const applySellCb = document.getElementById('pb-apply-sell');
+  const sellWrap = document.getElementById('pb-sell-wrap');
+  const sellPriceInput = document.getElementById('pb-sell-price');
+  const belowWarn = document.getElementById('pb-below-warn');
+
+  function syncMedSelection() {
+    state.pbSelectedMedId = medSelect.value;
+    const isNew = !medSelect.value;
+    newMedFields.classList.toggle('hidden', !isNew);
+    if (!isNew) {
+      const m = state.medications.find((x) => x.id === medSelect.value);
+      if (m) {
+        const meta = inferGenericAndCompany(m);
+        if (meta.company) compInput.value = meta.company;
+        if (meta.generic) genInput.value = meta.generic;
+        if (UNIT_TYPES.includes(m.stock_unit)) unitSelect.value = m.stock_unit;
+      }
+    }
+  }
+
+  function refreshBelowWarn() {
+    const unitCost = Number(unitPriceInput.value);
+    const sellVal = sellPriceInput.value;
+    if (applySellCb.checked && sellVal !== '' && isBelowCost(sellVal, unitCost)) {
+      belowWarn.textContent = `⚠ ${money(sellVal)} is AT OR BELOW buy cost (${money(unitCost)}). Increase selling price to make profit!`;
+      belowWarn.classList.remove('hidden');
+    } else {
+      belowWarn.classList.add('hidden');
+    }
+  }
+
+  function refreshMarkupPreview() {
+    const unitCost = Number(unitPriceInput.value);
+    if (!Number.isFinite(unitCost) || unitCost <= 0) {
+      helperEl.innerHTML = `<p class="font-semibold text-tealDark">Enter Total Paid or Single Unit Cost to see safe selling prices.</p>`;
+      refreshBelowWarn();
+      return;
+    }
+    const calc = calculateSellingPriceOptions(unitCost, 25);
+    helperEl.innerHTML = `
+      <p class="font-semibold text-tealDark">Recommended Selling Prices (Never sell at or below ${esc(money(unitCost))}):</p>
+      <div class="flex flex-wrap gap-1.5">
+        ${calc.options
+          .map(
+            (o) => `
+          <button type="button" class="pb-markup-pick touch-target px-2.5 py-1.5 rounded-lg border ${
+            o.isDefault ? 'bg-teal text-white border-teal' : 'bg-white border-teal/40 text-tealDark hover:bg-teal/10'
+          } font-semibold" data-price="${o.price}">
+            +${o.pct}% → ${esc(money(o.price))}
+          </button>`,
+          )
+          .join('')}
+      </div>`;
+    helperEl.querySelectorAll('.pb-markup-pick').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        applySellCb.checked = true;
+        sellWrap.classList.remove('hidden');
+        sellPriceInput.value = btn.dataset.price;
+        refreshBelowWarn();
+      });
+    });
+    if (!sellPriceInput.value) {
+      const def = calc.options.find((o) => o.isDefault) || calc.options[0];
+      if (def) sellPriceInput.value = def.price;
+    }
+    refreshBelowWarn();
+  }
+
+  medSelect.addEventListener('change', syncMedSelection);
+  if (state.pbSelectedMedId) syncMedSelection();
+
+  const recalcFromTotal = () => {
+    const q = Number(qtyInput.value);
+    const t = Number(totalInput.value);
+    if (q > 0 && Number.isFinite(t) && totalInput.value !== '') {
+      unitPriceInput.value = (t / q).toFixed(2);
+    }
+    refreshMarkupPreview();
+  };
+
+  totalInput.addEventListener('input', recalcFromTotal);
+  qtyInput.addEventListener('input', recalcFromTotal);
+  unitPriceInput.addEventListener('input', () => {
+    const q = Number(qtyInput.value);
+    const u = Number(unitPriceInput.value);
+    if (q > 0 && Number.isFinite(u) && unitPriceInput.value !== '') {
+      totalInput.value = (u * q).toFixed(2);
+    }
+    refreshMarkupPreview();
+  });
+
+  applySellCb.addEventListener('change', () => {
+    sellWrap.classList.toggle('hidden', !applySellCb.checked);
+    refreshBelowWarn();
+  });
+  sellPriceInput.addEventListener('input', refreshBelowWarn);
+
+  document.getElementById('pb-search').addEventListener('input', (e) => {
+    state.pbSearch = e.target.value;
+    updatePurchaseResults();
+  });
+
+  document.getElementById('pb-company-filter').addEventListener('change', (e) => {
+    state.pbCompany = e.target.value;
+    updatePurchaseResults();
+  });
+
+  document.getElementById('pb-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const submitBtn = document.getElementById('pb-submit-btn');
+    let medId = medSelect.value || null;
+    let medName = medId ? medSelect.selectedOptions[0].textContent : document.getElementById('pb-new-name').value.trim();
+
+    if (!medName) {
+      showToast('Pick an existing medicine or type a new medicine name.', 'warn');
+      return;
+    }
+
+    const company = compInput.value.trim() || null;
+    const genericName = genInput.value.trim() || null;
+    const packDesc = document.getElementById('pb-pack').value.trim();
+    const qtyUnits = Number(qtyInput.value);
+    const unitType = unitSelect.value;
+    const unitBuyPrice = Number(unitPriceInput.value);
+    const totalCost = Number(totalInput.value);
+    const sellPriceVal = applySellCb.checked && sellPriceInput.value !== '' ? Number(sellPriceInput.value) : null;
+
+    if (sellPriceVal !== null && isBelowCost(sellPriceVal, unitBuyPrice)) {
+      const ok = await confirmModal({
+        title: 'Selling Price Warning',
+        message: `Your entered retail selling price (${money(sellPriceVal)}) is AT OR BELOW the buy cost (${money(unitBuyPrice)}). Uncle says not to sell for what you bought it for — continue anyway?`,
+        confirmLabel: 'Save Anyway',
+        danger: true,
+        triggerEl: submitBtn,
+      });
+      if (!ok) return;
+    }
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Saving…';
+
+    try {
+      if (!medId) {
+        const newCat = document.getElementById('pb-new-cat').value.trim() || 'Other';
+        const { data: createdId, error: rpcErr } = await supabase.rpc('create_medication_from_purchase', {
+          p_name: medName,
+          p_category: newCat,
+          p_company: company,
+          p_generic_name: genericName,
+        });
+        if (rpcErr) throw rpcErr;
+        medId = createdId;
+      }
+
+      const payload = {
+        medication_id: medId,
+        medication_name: medName,
+        company,
+        generic_name: genericName,
+        supplier: document.getElementById('pb-supplier').value.trim() || null,
+        pack_description: packDesc,
+        quantity_units: qtyUnits,
+        unit_type: unitType,
+        unit_buy_price: unitBuyPrice,
+        total_cost: totalCost,
+        suggested_sell_price: sellPriceVal,
+        purchased_at: document.getElementById('pb-date').value,
+        expiry_date: document.getElementById('pb-expiry').value || null,
+        notes: document.getElementById('pb-notes').value.trim() || null,
+        recorded_by: state.session.user.id,
+        recorded_by_email: state.session.user.email,
+      };
+
+      const { error: insErr } = await supabase.from('purchase_entries').insert(payload);
+      if (insErr) throw insErr;
+
+      if (sellPriceVal !== null) {
+        const priceField = 'price_' + unitType;
+        if (isOwner()) {
+          await supabase.from('medications').update({ [priceField]: sellPriceVal }).eq('id', medId);
+        } else {
+          await supabase.from('suggestions').insert({
+            type: 'price_change',
+            medication_id: medId,
+            name: medName,
+            company,
+            generic_name: genericName,
+            [priceField]: sellPriceVal,
+            suggested_buy_price: unitBuyPrice,
+            note: `From Purchase Book (${packDesc} @ ${money(unitBuyPrice)}/${unitType})`,
+            suggested_by: state.session.user.id,
+            suggested_by_email: state.session.user.email,
+          });
+        }
+      }
+
+      await Promise.all([loadMedications(), loadPurchaseEntries(), loadSuggestions()]);
+      state.pbSelectedMedId = '';
+      refreshTabBar();
+      renderPurchaseBookTab();
+      showToast(`Saved "${medName}" to Purchase Book & updated stock!`, 'success');
+    } catch (err) {
+      showToast('Could not save purchase: ' + err.message, 'error');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Save to Purchase Book';
+    }
+  });
+
+  updatePurchaseResults();
 }
 
 // ---------------------------------------------------------
-// SUGGESTIONS tab
+// TAB 3: RESTOCK & COMPANIES ON SHELF
 // ---------------------------------------------------------
-async function renderSuggestions() {
-  const { data: suggestions } = await supabase.from('suggestions').select('*').order('created_at', { ascending: false });
-  const categories = [...new Set(state.medications.map(m => m.category))];
+function updateRestockResults() {
+  const resultsEl = document.getElementById('restock-results');
+  const printEl = document.getElementById('restock-print');
+  if (!resultsEl) return;
 
-  renderShell(`
-    <div class="grid md:grid-cols-2 gap-6">
-      <div>
-        <h2 class="font-display text-lg mb-3">Suggest a change</h2>
-        <form id="suggestion-form" class="bg-white border border-black/5 rounded-xl p-4 space-y-3">
-          <div class="flex gap-2 text-sm">
-            <label class="flex items-center gap-1"><input type="radio" name="s-type" value="price_change" checked> Price change</label>
-            <label class="flex items-center gap-1"><input type="radio" name="s-type" value="new_med"> New medicine</label>
+  const vel = analyzeInventoryVelocity(state.medications, state.saleItems, state.purchaseEntries);
+  const q = state.restockSearch.trim();
+
+  if (printEl) {
+    printEl.innerHTML = `
+      <h2 class="font-display text-xl font-bold mb-1">Pharmacy Restock Sheet</h2>
+      <p class="text-xs mb-4">Generated ${esc(new Date().toLocaleString())}</p>
+      <pre class="whitespace-pre-wrap text-sm font-sans leading-relaxed">${esc(vel.restockListText)}</pre>
+    `;
+  }
+
+  if (state.restockFilter === 'companies') {
+    const groups = vel.companyGroups.filter((g) => {
+      if (!q) return true;
+      return fuzzyScore(q, g.company) >= 55 || g.items.some((m) => fuzzyScore(q, m) >= 55);
+    });
+
+    resultsEl.innerHTML = groups
+      .map(
+        (g) => `
+      <article class="card-surface bg-white border border-black/10 rounded-xl p-4 space-y-2">
+        <div class="flex items-center justify-between gap-2">
+          <h3 class="font-semibold text-base text-tealDark">${esc(g.company)}</h3>
+          <span class="text-xs font-bold px-2.5 py-1 rounded-full bg-teal/10 text-tealDark">${g.count} item(s)</span>
+        </div>
+        <div class="grid sm:grid-cols-2 gap-2">
+          ${g.items
+            .slice(0, 30)
+            .map(
+              (m) => `
+            <div class="border border-black/10 rounded-lg p-2.5 text-xs flex justify-between items-center gap-2">
+              <div class="min-w-0">
+                <p class="font-semibold truncate">${esc(m.name)}</p>
+                <p class="text-ink/75">${esc(m.meta.generic || m.category)}</p>
+              </div>
+              <span class="font-semibold text-tealDark shrink-0">
+                ${m.availablePrices[0] ? esc(money(m.availablePrices[0].unitPrice)) : 'No price'}
+              </span>
+            </div>`,
+            )
+            .join('')}
+        </div>
+      </article>`,
+      )
+      .join('');
+    return;
+  }
+
+  let list = vel.items;
+  if (state.restockFilter === 'restock_now') list = [...vel.restockNow, ...vel.lowStock];
+  else if (state.restockFilter === 'fast_mover') list = vel.fastMovers;
+  else if (state.restockFilter === 'slow_mover') list = vel.slowMovers;
+  else if (state.restockFilter === 'missing_price') list = vel.missingPrice;
+
+  if (q) {
+    list = list.filter((x) => fuzzyScore(q, x.med) >= 55);
+  }
+
+  if (list.length === 0) {
+    resultsEl.innerHTML = `
+      <div class="card-surface bg-white border border-black/10 rounded-xl p-6 text-center text-sm text-ink/80">
+        No items in this filter right now. Tip: Enter a shelf stock count below or log purchases in <strong>Purchase Book</strong> to automatically track low-stock &amp; slow-mover alerts!
+      </div>`;
+    return;
+  }
+
+  resultsEl.innerHTML = list
+    .slice(0, 100)
+    .map((x) => {
+      const m = x.med;
+      const statusPill =
+        x.status === 'restock_now'
+          ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-red-100 text-red-900">Restock Now</span>'
+          : x.status === 'low_stock'
+            ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900">Low Stock</span>'
+            : x.status === 'slow_mover'
+              ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-purple-100 text-purple-900">Slow Mover — Don\'t Overbuy</span>'
+              : x.status === 'fast_mover'
+                ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900">Fast Mover</span>'
+                : '<span class="text-xs font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-800">Stock Untracked</span>';
+
+      return `
+        <article class="card-surface bg-white border border-black/10 rounded-xl p-4 space-y-3" data-restock-id="${esc(m.id)}">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <h3 class="font-semibold text-base">${esc(m.name)}</h3>
+              <p class="text-xs text-ink/80">
+                ${esc(m.category)}
+                ${x.meta.company ? ` · Company: <strong>${esc(x.meta.company)}</strong>` : ''}
+                · Sold: <strong>${x.sold7d}</strong> (7d) / <strong>${x.sold30d}</strong> (30d)
+              </p>
+            </div>
+            <div class="flex flex-wrap gap-1.5 items-center">
+              ${statusPill}
+              ${x.missingPrice ? '<span class="text-xs font-bold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900">Missing Sell Price</span>' : ''}
+            </div>
           </div>
-          <select id="s-medication" class="w-full border border-black/10 rounded-lg px-3 py-2">
-            <option value="">— pick existing medicine (for price change) —</option>
-            ${state.medications.map(m => `<option value="${m.id}" data-name="${m.name.replace(/"/g, '&quot;')}">${m.name}</option>`).join('')}
-          </select>
-          <input id="s-name" placeholder="Medicine name (required for new medicine)" class="w-full border border-black/10 rounded-lg px-3 py-2" />
-          <input id="s-category" list="cat-list" placeholder="Category (e.g. Pain Relief)" class="w-full border border-black/10 rounded-lg px-3 py-2" />
-          <datalist id="cat-list">${categories.map(c => `<option value="${c}">`).join('')}</datalist>
-          <div class="grid grid-cols-3 sm:grid-cols-6 gap-2">
-  <input id="s-packet" type="number" step="0.01" placeholder="Packet ₦" class="border border-black/10 rounded-lg px-2 py-2" />
-  <input id="s-box" type="number" step="0.01" placeholder="Box ₦" class="border border-black/10 rounded-lg px-2 py-2" />
-  <input id="s-card" type="number" step="0.01" placeholder="Card ₦" class="border border-black/10 rounded-lg px-2 py-2" />
-  <input id="s-bottle" type="number" step="0.01" placeholder="Bottle ₦" class="border border-black/10 rounded-lg px-2 py-2" />
-  <input id="s-tube" type="number" step="0.01" placeholder="Tube ₦" class="border border-black/10 rounded-lg px-2 py-2" />
-  <input id="s-counting" type="number" step="0.01" placeholder="Counting ₦" class="border border-black/10 rounded-lg px-2 py-2" />
-</div>
-          <textarea id="s-note" placeholder="Note (optional — why this change?)" class="w-full border border-black/10 rounded-lg px-3 py-2"></textarea>
-          <button type="submit" class="w-full bg-teal hover:bg-tealDark text-white rounded-lg py-2 font-medium">Submit suggestion</button>
+
+          <div class="flex flex-wrap items-end justify-between gap-3 pt-1 border-t border-black/10">
+            <div class="flex flex-wrap items-end gap-2">
+              <div>
+                <label for="stk-${esc(m.id)}" class="block text-xs font-semibold mb-1">Shelf Count</label>
+                <input id="stk-${esc(m.id)}" type="number" min="0" step="1" value="${m.stock_qty ?? ''}" placeholder="Count"
+                  class="touch-target w-24 border border-black/20 rounded-lg px-2.5 py-1.5 text-sm bg-white" />
+              </div>
+              <div>
+                <label for="reo-${esc(m.id)}" class="block text-xs font-semibold mb-1">Alert Below</label>
+                <input id="reo-${esc(m.id)}" type="number" min="0" step="1" value="${m.reorder_level ?? 5}"
+                  class="touch-target w-24 border border-black/20 rounded-lg px-2.5 py-1.5 text-sm bg-white" />
+              </div>
+              <button type="button" class="save-stock-btn touch-target px-3.5 py-2 rounded-lg bg-teal hover:bg-tealDark text-white text-xs font-semibold" data-id="${esc(m.id)}">
+                Save Count
+              </button>
+            </div>
+            <div class="text-xs text-right text-ink/80">
+              ${x.suggestedOrderQty > 0 ? `<p class="font-bold text-tealDark">Suggested order: ${x.suggestedOrderQty} ${esc(m.stock_unit || 'unit')}</p>` : ''}
+              ${x.lastBuyUnitPrice ? `<p>Last buy: ${esc(money(x.lastBuyUnitPrice))}${x.estimatedOrderCost ? ` · Est: ${esc(money(x.estimatedOrderCost))}` : ''}</p>` : ''}
+            </div>
+          </div>
+        </article>`;
+    })
+    .join('');
+
+  resultsEl.querySelectorAll('.save-stock-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      const stkVal = document.getElementById(`stk-${id}`).value;
+      const reoVal = document.getElementById(`reo-${id}`).value;
+      if (stkVal === '') {
+        showToast('Enter a shelf count (0 or higher) before saving.', 'warn');
+        return;
+      }
+      const { error } = await supabase.rpc('adjust_stock_level', {
+        p_medication_id: id,
+        p_stock_qty: Number(stkVal),
+        p_reorder_level: reoVal === '' ? null : Number(reoVal),
+      });
+      if (error) showToast('Could not update stock: ' + error.message, 'error');
+      else {
+        await loadMedications();
+        refreshTabBar();
+        renderRestockTab();
+        showToast('Shelf stock count updated!', 'success');
+      }
+    });
+  });
+}
+
+function renderRestockTab() {
+  const panel = document.getElementById('tab-panel');
+  const vel = analyzeInventoryVelocity(state.medications, state.saleItems, state.purchaseEntries);
+
+  const filterCards = [
+    { id: 'restock_now', label: 'Need Restock', count: vel.urgentItems.length, tone: 'border-red-300 bg-red-50 text-red-900' },
+    { id: 'fast_mover', label: 'Fast Movers', count: vel.fastMovers.length, tone: 'border-emerald-300 bg-emerald-50 text-emerald-900' },
+    { id: 'slow_mover', label: 'Slow Movers (Avoid Overbuy)', count: vel.slowMovers.length, tone: 'border-purple-300 bg-purple-50 text-purple-900' },
+    { id: 'missing_price', label: 'Missing Selling Price', count: vel.missingPrice.length, tone: 'border-amber-300 bg-amber-50 text-amber-900' },
+    { id: 'companies', label: 'Companies on Shelf', count: vel.companyGroups.length, tone: 'border-teal/40 bg-teal/5 text-tealDark' },
+    { id: 'all', label: 'All Shelf Items', count: vel.items.length, tone: 'border-black/15 bg-white text-ink' },
+  ];
+
+  panel.innerHTML = `
+    <section class="space-y-4" aria-labelledby="restock-heading">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 id="restock-heading" class="font-display text-xl font-semibold text-tealDark">Restock &amp; Shelf Planner</h2>
+          <p class="text-xs text-ink/80">Spot missing items before buying stock, avoid overbuying slow movers, and check which companies you carry.</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" id="copy-restock-btn" class="touch-target px-4 py-2 rounded-lg bg-teal hover:bg-tealDark text-white text-xs font-semibold">
+            Copy Restock List (WhatsApp)
+          </button>
+          <button type="button" id="print-restock-btn" class="touch-target px-4 py-2 rounded-lg border border-black/20 bg-white text-xs font-semibold hover:bg-black/5">
+            Print Restock Sheet
+          </button>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+        ${filterCards
+          .map(
+            (c) => `
+          <button type="button" data-filter="${c.id}"
+            aria-pressed="${state.restockFilter === c.id}"
+            class="restock-filter-btn touch-target rounded-xl border p-3 text-left transition ${c.tone} ${
+              state.restockFilter === c.id ? 'ring-2 ring-teal shadow-sm' : 'opacity-90 hover:opacity-100'
+            }">
+            <p class="text-lg font-bold">${c.count}</p>
+            <p class="text-xs font-semibold leading-tight">${esc(c.label)}</p>
+          </button>`,
+          )
+          .join('')}
+      </div>
+
+      <div class="card-surface bg-white border border-black/10 rounded-xl p-4">
+        <label for="restock-search" class="block text-xs font-semibold mb-1">Filter restock list or companies</label>
+        <input id="restock-search" type="search" value="${esc(state.restockSearch)}" placeholder="Search medicine, category, or company…"
+          class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+      </div>
+
+      <div id="restock-results" class="space-y-3"></div>
+      <div id="restock-print" class="hidden print:block"></div>
+    </section>
+  `;
+
+  panel.querySelectorAll('.restock-filter-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.restockFilter = btn.dataset.filter;
+      panel.querySelectorAll('.restock-filter-btn').forEach((b) => {
+        const active = b.dataset.filter === state.restockFilter;
+        b.setAttribute('aria-pressed', String(active));
+        b.classList.toggle('ring-2', active);
+        b.classList.toggle('ring-teal', active);
+      });
+      updateRestockResults();
+    });
+  });
+
+  document.getElementById('restock-search').addEventListener('input', (e) => {
+    state.restockSearch = e.target.value;
+    updateRestockResults();
+  });
+
+  document.getElementById('copy-restock-btn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(vel.restockListText);
+      showToast('Restock list copied — ready to paste into WhatsApp!', 'success');
+    } catch {
+      showToast('Could not auto-copy. Use Print Restock Sheet instead.', 'warn');
+    }
+  });
+
+  document.getElementById('print-restock-btn').addEventListener('click', () => {
+    document.body.dataset.printTarget = 'restock';
+    window.print();
+  });
+
+  updateRestockResults();
+}
+
+// ---------------------------------------------------------
+// TAB 4: AI ASSISTANT (Hybrid Local + Gemini Edge Function)
+// ---------------------------------------------------------
+async function runAiQuestion(question, medication = null) {
+  const q = String(question || '').trim();
+  if (!q) return;
+  state.aiLoading = true;
+  renderAiOutput();
+
+  const res = await askPharmacyAI({
+    supabase,
+    question: q,
+    medication,
+    meds: state.medications,
+    purchaseEntries: state.purchaseEntries,
+    saleItems: state.saleItems,
+  });
+
+  state.aiLoading = false;
+  if (res.geminiConfigured !== undefined) state.aiGeminiConfigured = res.geminiConfigured;
+  state.aiResults.unshift({ question: q, ...res, timestamp: new Date().toLocaleTimeString() });
+  renderAiOutput();
+  announce(`AI answer ready: ${res.title}`);
+}
+
+function renderAiOutput() {
+  const out = document.getElementById('ai-output');
+  const badge = document.getElementById('ai-engine-badge');
+  if (badge) {
+    badge.textContent =
+      state.aiGeminiConfigured === true
+        ? 'Mode: Gemini Cloud + Local Smart Engine'
+        : 'Mode: Built-in Smart AI (Offline Ready)';
+  }
+  if (!out) return;
+
+  if (state.aiLoading) {
+    out.innerHTML = `
+      <div class="card-surface bg-white border border-teal/30 rounded-xl p-5 text-sm font-medium text-tealDark" role="status">
+        Thinking through shelf prices, Purchase Book costs, and drug safety…
+      </div>`;
+    return;
+  }
+
+  if (state.aiResults.length === 0) {
+    out.innerHTML = `
+      <div class="card-surface bg-white border border-black/10 rounded-xl p-6 text-sm text-ink/80">
+        Ask any question above or tap one of the quick buttons to calculate multi-item totals, check Uncle's purchase markup, compare companies on your shelf, or review age &amp; allergy safety.
+      </div>`;
+    return;
+  }
+
+  out.innerHTML = state.aiResults
+    .map((r, rIdx) => {
+      const sectionsHtml = (r.sections || [])
+        .map(
+          (s) => `
+          <div class="rounded-lg bg-black/[0.03] border border-black/10 p-3 space-y-1">
+            <h4 class="text-xs font-bold uppercase tracking-wide text-tealDark">${esc(s.heading)}</h4>
+            <p class="text-sm whitespace-pre-line leading-relaxed">${esc(s.body)}</p>
+          </div>`,
+        )
+        .join('');
+
+      const actionsHtml = (r.actions || [])
+        .map(
+          (a, aIdx) => `
+          <button type="button" class="ai-action-btn touch-target px-3.5 py-2 rounded-lg bg-teal hover:bg-tealDark text-white text-xs font-semibold"
+            data-r="${rIdx}" data-a="${aIdx}">
+            ${esc(a.label)}
+          </button>`,
+        )
+        .join('');
+
+      return `
+        <article class="card-surface bg-white border border-black/10 rounded-xl p-5 space-y-3">
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p class="text-xs font-semibold text-ink/70">Asked at ${esc(r.timestamp)}: "${esc(r.question)}"</p>
+              <h3 class="font-display text-lg font-semibold text-tealDark">${esc(r.title)}</h3>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-bold px-2.5 py-1 rounded-full ${r.mode === 'gemini' ? 'bg-indigo-100 text-indigo-900' : 'bg-teal/10 text-tealDark'}">
+                ${r.mode === 'gemini' ? 'Gemini Cloud AI' : 'Built-in Smart AI'}
+              </span>
+              <button type="button" class="ai-speak-btn touch-target px-3 py-1.5 rounded-lg border border-black/20 text-xs font-semibold hover:bg-black/5" data-r="${rIdx}">
+                Read Aloud
+              </button>
+            </div>
+          </div>
+
+          <div class="text-sm whitespace-pre-line leading-relaxed">${esc(r.answer)}</div>
+          ${sectionsHtml ? `<div class="space-y-2">${sectionsHtml}</div>` : ''}
+          ${actionsHtml ? `<div class="flex flex-wrap gap-2 pt-1">${actionsHtml}</div>` : ''}
+          ${r.statusNote ? `<p class="text-xs text-ink/70">${esc(r.statusNote)}</p>` : ''}
+        </article>`;
+    })
+    .join('');
+
+  out.querySelectorAll('.ai-speak-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const r = state.aiResults[Number(btn.dataset.r)];
+      if (r) speakText(`${r.title}. ${r.answer}`);
+    });
+  });
+
+  out.querySelectorAll('.ai-action-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const r = state.aiResults[Number(btn.dataset.r)];
+      const action = r?.actions?.[Number(btn.dataset.a)];
+      if (!action) return;
+
+      if (action.type === 'add_all_to_cart') {
+        (action.items || []).forEach((it) => {
+          for (let q = 0; q < (it.quantity || 1); q++) {
+            addToCart({
+              id: it.medication_id,
+              name: it.name,
+              qtyType: it.qty_type,
+              unitPrice: it.unit_price,
+            });
+          }
+        });
+        showToast('Added item(s) to Current Sale!', 'success');
+        switchTab('sell', { moveFocus: true });
+      } else if (action.type === 'compare_brands') {
+        openBrandComparisonModal(action.medicationId, btn);
+      } else if (action.type === 'open_purchase_book') {
+        state.pbSelectedMedId = action.medicationId || '';
+        switchTab('purchase', { moveFocus: true });
+      } else if (action.type === 'prefill_suggestion') {
+        state.suggestionDraft = {
+          type: 'price_change',
+          medicationId: action.medicationId,
+          suggestedPrice: action.suggestedPrice,
+        };
+        switchTab('suggestions', { moveFocus: true });
+      } else if (action.type === 'open_tab') {
+        switchTab(action.tab || 'sell', { moveFocus: true });
+      }
+    });
+  });
+}
+
+function renderAssistantTab() {
+  const panel = document.getElementById('tab-panel');
+  const quickChips = [
+    'What companies of Amlodipine do we have?',
+    'Price check: 2 cards Amoxil 500 and 1 bottle Abidec',
+    'Who should NOT take Amoxil or Ciprofloxacin?',
+    'What should we restock and avoid overbuying?',
+    'Bought 1 roll of 10 for 8500, what should I sell 1 for?',
+  ];
+
+  panel.innerHTML = `
+    <section class="space-y-4" aria-labelledby="ai-heading">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 id="ai-heading" class="font-display text-xl font-semibold text-tealDark">Pharmacy Counter AI Assistant</h2>
+          <p id="ai-engine-badge" class="text-xs font-semibold text-ink/80"></p>
+        </div>
+        <details class="text-xs bg-white border border-black/15 rounded-lg px-3 py-2 max-w-md">
+          <summary class="font-semibold cursor-pointer text-tealDark">Optional: Enable Gemini Cloud AI (1-min setup)</summary>
+          <p class="mt-2 leading-relaxed">
+            Built-in Smart AI already works free without any key. To upgrade to Gemini Cloud AI too:
+            1) Get a free key from Google AI Studio,
+            2) Add secret <code class="font-mono bg-black/5 px-1">GEMINI_API_KEY</code> in Supabase Dashboard → Edge Functions → <code class="font-mono bg-black/5 px-1">pharmacy-ai</code> → Secrets.
+          </p>
+        </details>
+      </div>
+
+      <div class="rounded-xl bg-amber-50 border border-amber-300 px-4 py-3 text-xs font-medium text-amber-950">
+        <strong>Clinical Safety Notice:</strong> ${esc(DISCLAIMER)}
+      </div>
+
+      <div class="card-surface bg-white border border-black/10 rounded-xl p-4 space-y-3">
+        <div class="flex flex-wrap gap-2">
+          ${quickChips
+            .map(
+              (c) => `
+            <button type="button" class="ai-chip touch-target text-xs font-semibold px-3 py-1.5 rounded-full border border-teal/40 text-tealDark hover:bg-teal/10" data-q="${esc(c)}">
+              ${esc(c)}
+            </button>`,
+            )
+            .join('')}
+        </div>
+
+        <form id="ai-form" class="space-y-2">
+          <label for="ai-input" class="block text-xs font-semibold">Ask about prices, buy cost markup, companies on shelf, restock, or drug safety</label>
+          <div class="flex flex-col sm:flex-row gap-2">
+            <input id="ai-input" type="text" value="${esc(state.aiPrompt)}" placeholder="Type or tap microphone to ask…"
+              class="touch-target flex-1 border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            <div class="flex gap-2">
+              ${
+                supportsVoiceRecognition()
+                  ? `<button type="button" id="ai-voice-btn" class="touch-target px-3.5 py-2 rounded-lg border border-black/20 text-xs font-semibold hover:bg-black/5">🎤 Voice</button>`
+                  : ''
+              }
+              <button type="submit" class="touch-target px-5 py-2 rounded-lg bg-teal hover:bg-tealDark text-white text-sm font-semibold">
+                Ask AI
+              </button>
+            </div>
+          </div>
         </form>
       </div>
 
-      <div>
-        <h2 class="font-display text-lg mb-3">${isOwner() ? 'Review suggestions' : 'Suggestion status'}</h2>
-        <div class="space-y-2 max-h-[65vh] overflow-y-auto pr-1">
-          ${(suggestions || []).length === 0 ? `<p class="text-sm text-ink/50">No suggestions yet.</p>` : ''}
-          ${(suggestions || []).map(s => `
-            <div class="bg-white border border-black/5 rounded-xl p-4">
+      <div id="ai-output" class="space-y-4"></div>
+    </section>
+  `;
+
+  const inputEl = document.getElementById('ai-input');
+  inputEl.addEventListener('input', (e) => {
+    state.aiPrompt = e.target.value;
+  });
+
+  panel.querySelectorAll('.ai-chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.aiPrompt = btn.dataset.q;
+      inputEl.value = btn.dataset.q;
+      runAiQuestion(btn.dataset.q);
+    });
+  });
+
+  document.getElementById('ai-voice-btn')?.addEventListener('click', (e) => {
+    startVoiceInput((text) => {
+      state.aiPrompt = text;
+      inputEl.value = text;
+      runAiQuestion(text);
+    }, e.currentTarget);
+  });
+
+  document.getElementById('ai-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    runAiQuestion(inputEl.value);
+  });
+
+  renderAiOutput();
+}
+
+// ---------------------------------------------------------
+// TAB 5: SUGGESTIONS (Accessible + Below-Cost Guardrail)
+// ---------------------------------------------------------
+function renderSuggestionsTab() {
+  const panel = document.getElementById('tab-panel');
+  const categories = [...new Set(state.medications.map((m) => m.category))];
+  const draft = state.suggestionDraft;
+
+  panel.innerHTML = `
+    <div class="grid md:grid-cols-2 gap-6 items-start">
+      <section class="card-surface bg-white border border-black/10 rounded-xl p-5" aria-labelledby="sug-form-heading">
+        <h2 id="sug-form-heading" class="font-display text-xl font-semibold text-tealDark mb-3">Suggest a Price or New Medicine</h2>
+        <form id="suggestion-form" class="space-y-3">
+          <fieldset class="flex flex-wrap gap-4 text-sm">
+            <legend class="text-xs font-semibold mb-1">Suggestion Type</legend>
+            <label class="touch-target inline-flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="s-type" value="price_change" ${draft?.type !== 'new_med' ? 'checked' : ''} class="w-4 h-4 accent-teal" />
+              Price change
+            </label>
+            <label class="touch-target inline-flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="s-type" value="new_med" ${draft?.type === 'new_med' ? 'checked' : ''} class="w-4 h-4 accent-teal" />
+              New medicine
+            </label>
+          </fieldset>
+
+          <div id="s-existing-wrap">
+            <label for="s-medication" class="block text-xs font-semibold mb-1">Existing medicine</label>
+            <select id="s-medication" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white">
+              <option value="">— Pick existing medicine —</option>
+              ${state.medications
+                .map(
+                  (m) =>
+                    `<option value="${esc(m.id)}" data-name="${esc(m.name)}" ${draft?.medicationId === m.id ? 'selected' : ''}>${esc(m.name)}</option>`,
+                )
+                .join('')}
+            </select>
+          </div>
+
+          <div id="s-new-name-wrap" class="hidden">
+            <label for="s-name" class="block text-xs font-semibold mb-1">New medicine name</label>
+            <input id="s-name" type="text" placeholder="Medicine name" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+          </div>
+
+          <div id="s-buy-cost-banner" class="hidden rounded-lg bg-teal/5 border border-teal/25 px-3 py-2 text-xs"></div>
+
+          <div class="grid sm:grid-cols-3 gap-2">
+            <div>
+              <label for="s-category" class="block text-xs font-semibold mb-1">Category</label>
+              <input id="s-category" list="cat-list" placeholder="Pain Relief" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+              <datalist id="cat-list">${categories.map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
+            </div>
+            <div>
+              <label for="s-company" class="block text-xs font-semibold mb-1">Company / Brand</label>
+              <input id="s-company" type="text" placeholder="e.g. Berlin" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+            <div>
+              <label for="s-generic" class="block text-xs font-semibold mb-1">Active Ingredient</label>
+              <input id="s-generic" type="text" placeholder="e.g. Amlodipine" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            ${UNIT_TYPES.map(
+              (u) => `
+              <div>
+                <label for="s-${u}" class="block text-xs font-semibold mb-1">${u.charAt(0).toUpperCase() + u.slice(1)} (₦)</label>
+                <input id="s-${u}" type="number" step="0.01" min="0" placeholder="₦" class="s-price-inp touch-target w-full border border-black/20 rounded-lg px-2.5 py-2 bg-white" />
+              </div>`,
+            ).join('')}
+          </div>
+
+          <p id="s-below-cost-alert" role="alert" class="hidden text-xs font-bold text-red-800 bg-red-50 border border-red-300 rounded-lg px-3 py-2"></p>
+
+          <div>
+            <label for="s-note" class="block text-xs font-semibold mb-1">Note for Owner (optional)</label>
+            <textarea id="s-note" rows="2" placeholder="Why this change?" class="w-full border border-black/20 rounded-lg px-3 py-2 bg-white"></textarea>
+          </div>
+
+          <button type="submit" id="s-submit-btn" class="touch-target w-full bg-teal hover:bg-tealDark text-white rounded-lg py-2.5 font-semibold transition">
+            Submit Suggestion
+          </button>
+        </form>
+      </section>
+
+      <section class="space-y-3" aria-labelledby="sug-list-heading">
+        <h2 id="sug-list-heading" class="font-display text-xl font-semibold text-tealDark">${isOwner() ? 'Review Suggestions' : 'Suggestion Status'}</h2>
+        <div class="space-y-2 max-h-[70vh] overflow-y-auto pr-1">
+          ${state.suggestions.length === 0 ? `<p class="text-sm text-ink/75">No suggestions yet.</p>` : ''}
+          ${state.suggestions
+            .map(
+              (s) => `
+            <article class="card-surface bg-white border border-black/10 rounded-xl p-4">
               <div class="flex justify-between items-start gap-2">
                 <div>
-                  <p class="font-medium">${s.name} <span class="text-xs text-ink/40">(${s.type === 'new_med' ? 'new medicine' : 'price change'})</span></p>
-                  <p class="text-xs text-ink/50">${s.category || ''} · by ${s.suggested_by_email}</p>
-                  <p class="text-sm mt-1">
-                    ${s.price_packet != null ? `Packet: ${money(s.price_packet)} ` : ''}
-                    ${s.price_box != null ? `Box: ${money(s.price_box)} ` : ''}
-                    ${s.price_card != null ? `Card: ${money(s.price_card)} ` : ''}
-                    ${s.price_bottle != null ? `Bottle: ${money(s.price_bottle)} ` : ''}
-${s.price_tube != null ? `Tube: ${money(s.price_tube)} ` : ''}
-${s.price_counting != null ? `Counting: ${money(s.price_counting)}` : ''}
+                  <p class="font-semibold">${esc(s.name)} <span class="text-xs font-normal text-ink/70">(${s.type === 'new_med' ? 'new medicine' : 'price change'})</span></p>
+                  <p class="text-xs text-ink/80">
+                    ${esc(s.category || 'Other')}
+                    ${s.company ? ` · ${esc(s.company)}` : ''}
+                    · by ${esc(s.suggested_by_email)}
                   </p>
-                  ${s.note ? `<p class="text-xs text-ink/50 italic mt-1">"${s.note}"</p>` : ''}
+                  <p class="text-sm mt-1">
+                    ${UNIT_TYPES.filter((u) => s['price_' + u] != null)
+                      .map((u) => `${u.charAt(0).toUpperCase() + u.slice(1)}: ${money(s['price_' + u])}`)
+                      .join(' · ')}
+                  </p>
+                  ${s.note ? `<p class="text-xs text-ink/75 italic mt-1">"${esc(s.note)}"</p>` : ''}
                 </div>
-                <span class="text-xs px-2 py-1 rounded-full ${s.status === 'pending' ? 'bg-amber-100 text-amber-700' : s.status === 'approved' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">
-                  ${s.status}
-                </span>
+                <span class="text-xs font-bold px-2.5 py-1 rounded-full ${
+                  s.status === 'pending'
+                    ? 'bg-amber-100 text-amber-900'
+                    : s.status === 'approved'
+                      ? 'bg-emerald-100 text-emerald-900'
+                      : 'bg-red-100 text-red-900'
+                }">${esc(s.status)}</span>
               </div>
-              ${isOwner() && s.status === 'pending' ? `
+              ${
+                isOwner() && s.status === 'pending'
+                  ? `
                 <div class="flex gap-2 mt-3">
-                  <button data-id="${s.id}" data-approve="true" class="decide-btn flex-1 bg-teal hover:bg-tealDark text-white rounded-lg py-1.5 text-sm">Approve</button>
-                  <button data-id="${s.id}" data-approve="false" class="decide-btn flex-1 border border-clay text-clay rounded-lg py-1.5 text-sm">Reject</button>
-                </div>
-              ` : ''}
-            </div>
-          `).join('')}
+                  <button type="button" data-id="${esc(s.id)}" data-approve="true" class="decide-btn touch-target flex-1 bg-teal hover:bg-tealDark text-white rounded-lg py-2 text-sm font-semibold">Approve</button>
+                  <button type="button" data-id="${esc(s.id)}" data-approve="false" class="decide-btn touch-target flex-1 border border-clay text-clay rounded-lg py-2 text-sm font-semibold hover:bg-clay/10">Reject</button>
+                </div>`
+                  : ''
+              }
+            </article>`,
+            )
+            .join('')}
         </div>
-      </div>
+      </section>
     </div>
-  `);
-  
-document.querySelectorAll('#suggestion-form input:not([type="submit"])').forEach(input => {
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') e.preventDefault();
+  `;
+
+  const medSel = document.getElementById('s-medication');
+  const existingWrap = document.getElementById('s-existing-wrap');
+  const newNameWrap = document.getElementById('s-new-name-wrap');
+  const buyCostBanner = document.getElementById('s-buy-cost-banner');
+  const belowAlert = document.getElementById('s-below-cost-alert');
+  let activeBuyCost = null;
+
+  function checkSuggestionCost() {
+    if (!activeBuyCost) {
+      belowAlert.classList.add('hidden');
+      return;
+    }
+    const vals = [...panel.querySelectorAll('.s-price-inp')]
+      .map((el) => (el.value !== '' ? Number(el.value) : null))
+      .filter((v) => v !== null);
+    const bad = vals.some((v) => isBelowCost(v, activeBuyCost));
+    if (bad) {
+      belowAlert.textContent = `⚠ Warning: One of your entered prices is AT OR BELOW Uncle's buy cost (${money(activeBuyCost)}).`;
+      belowAlert.classList.remove('hidden');
+    } else {
+      belowAlert.classList.add('hidden');
+    }
+  }
+
+  function syncTypeAndMed() {
+    const type = panel.querySelector('input[name="s-type"]:checked').value;
+    existingWrap.classList.toggle('hidden', type === 'new_med');
+    newNameWrap.classList.toggle('hidden', type !== 'new_med');
+
+    const med = type === 'price_change' ? state.medications.find((m) => m.id === medSel.value) : null;
+    if (med) {
+      const meta = inferGenericAndCompany(med);
+      document.getElementById('s-category').value = med.category || '';
+      document.getElementById('s-company').value = meta.company || '';
+      document.getElementById('s-generic').value = meta.generic || '';
+      UNIT_TYPES.forEach((u) => {
+        const inp = document.getElementById(`s-${u}`);
+        inp.placeholder = med['price_' + u] != null ? `Now ${med['price_' + u]}` : '₦';
+      });
+      activeBuyCost = med.last_buy_unit_price ? Number(med.last_buy_unit_price) : null;
+      if (activeBuyCost) {
+        const calc = calculateSellingPriceOptions(activeBuyCost, 25);
+        const rec25 = calc.options.find((o) => o.pct === 25) || calc.options[0];
+        buyCostBanner.innerHTML = `<strong>Purchase Book Cost:</strong> ${esc(money(activeBuyCost))} · Recommended +25% sell: <strong>${esc(money(rec25?.price || activeBuyCost))}</strong>`;
+        buyCostBanner.classList.remove('hidden');
+      } else {
+        buyCostBanner.classList.add('hidden');
+      }
+    } else {
+      activeBuyCost = null;
+      buyCostBanner.classList.add('hidden');
+    }
+    checkSuggestionCost();
+  }
+
+  panel.querySelectorAll('input[name="s-type"]').forEach((r) => r.addEventListener('change', syncTypeAndMed));
+  medSel.addEventListener('change', syncTypeAndMed);
+  panel.querySelectorAll('.s-price-inp').forEach((inp) => inp.addEventListener('input', checkSuggestionCost));
+
+  if (draft?.suggestedPrice && draft?.medicationId) {
+    const med = state.medications.find((m) => m.id === draft.medicationId);
+    const field = UNIT_TYPES.includes(med?.stock_unit) ? med.stock_unit : 'packet';
+    const inp = document.getElementById(`s-${field}`);
+    if (inp) inp.value = draft.suggestedPrice;
+  }
+  state.suggestionDraft = null;
+  syncTypeAndMed();
+
+  panel.querySelectorAll('#suggestion-form input:not([type="submit"])').forEach((input) => {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') e.preventDefault();
+    });
   });
-});
+
   document.getElementById('suggestion-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const type = document.querySelector('input[name="s-type"]:checked').value;
-    const medSelect = document.getElementById('s-medication');
-    const medicationId = medSelect.value || null;
-    const medName = medSelect.selectedOptions[0]?.dataset.name;
-    const name = type === 'new_med' ? document.getElementById('s-name').value.trim() : (medName || document.getElementById('s-name').value.trim());
+    const submitBtn = document.getElementById('s-submit-btn');
+    const type = panel.querySelector('input[name="s-type"]:checked').value;
+    const medicationId = medSel.value || null;
+    const medName = medSel.selectedOptions[0]?.dataset.name;
+    const name = type === 'new_med' ? document.getElementById('s-name').value.trim() : medName || '';
 
-    if (!name) { alert('Please give the medicine a name, or pick one from the list.'); return; }
-    if (type === 'price_change' && !medicationId) { alert('Pick which existing medicine this price change is for.'); return; }
-const priceFields = ['s-packet','s-box','s-card','s-bottle','s-tube','s-counting'].map(id => document.getElementById(id).value);
-const noPriceEntered = priceFields.every(v => v === '');
-if (noPriceEntered) {
-  const proceed = confirm('No price was entered in any box. Submit anyway?');
-  if (!proceed) return;
-}
+    if (type === 'price_change' && !medicationId) {
+      showToast('Pick which existing medicine this price change is for.', 'warn');
+      return;
+    }
+    if (!name) {
+      showToast('Please enter the new medicine name.', 'warn');
+      return;
+    }
+
+    const noPriceEntered = UNIT_TYPES.every((u) => document.getElementById(`s-${u}`).value === '');
+    if (noPriceEntered) {
+      const proceed = await confirmModal({
+        title: 'No Prices Entered',
+        message: 'You have not typed any price values yet. Submit this suggestion anyway?',
+        confirmLabel: 'Submit Anyway',
+        triggerEl: submitBtn,
+      });
+      if (!proceed) return;
+    }
+
     const payload = {
       type,
       medication_id: type === 'price_change' ? medicationId : null,
       name,
       category: document.getElementById('s-category').value.trim() || 'Other',
-      price_packet: document.getElementById('s-packet').value ? Number(document.getElementById('s-packet').value) : null,
-      price_box: document.getElementById('s-box').value ? Number(document.getElementById('s-box').value) : null,
-      price_card: document.getElementById('s-card').value ? Number(document.getElementById('s-card').value) : null,
-      price_bottle: document.getElementById('s-bottle').value ? Number(document.getElementById('s-bottle').value) : null,
-price_tube: document.getElementById('s-tube').value ? Number(document.getElementById('s-tube').value) : null,
-price_counting: document.getElementById('s-counting').value ? Number(document.getElementById('s-counting').value) : null,
+      company: document.getElementById('s-company').value.trim() || null,
+      generic_name: document.getElementById('s-generic').value.trim() || null,
+      suggested_buy_price: activeBuyCost,
       note: document.getElementById('s-note').value.trim() || null,
       suggested_by: state.session.user.id,
       suggested_by_email: state.session.user.email,
     };
+    UNIT_TYPES.forEach((u) => {
+      const val = document.getElementById(`s-${u}`).value;
+      payload['price_' + u] = val === '' ? null : Number(val);
+    });
+
     const { error } = await supabase.from('suggestions').insert(payload);
-    if (error) alert('Could not submit: ' + error.message);
-    else renderSuggestions();
+    if (error) showToast('Could not submit: ' + error.message, 'error');
+    else {
+      await loadSuggestions();
+      refreshTabBar();
+      renderSuggestionsTab();
+      showToast('Suggestion submitted!', 'success');
+    }
   });
 
-  document.querySelectorAll('.decide-btn').forEach(btn => {
+  panel.querySelectorAll('.decide-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
+      const approve = btn.dataset.approve === 'true';
       const { error } = await supabase.rpc('decide_suggestion', {
         p_suggestion_id: btn.dataset.id,
-        p_approve: btn.dataset.approve === 'true',
+        p_approve: approve,
       });
-      if (error) alert('Could not decide: ' + error.message);
-      else { await loadMedications(); renderSuggestions(); }
+      if (error) showToast('Could not decide: ' + error.message, 'error');
+      else {
+        await Promise.all([loadMedications(), loadSuggestions()]);
+        refreshTabBar();
+        renderSuggestionsTab();
+        showToast(approve ? 'Suggestion approved & price list updated!' : 'Suggestion rejected.', 'success');
+      }
     });
   });
 }
 
 // ---------------------------------------------------------
-// ADMIN tab (owner only) — edit the price list directly
+// TAB 6: SALES HISTORY (Filterable + Reprint Receipt)
 // ---------------------------------------------------------
-function renderAdmin() {
-  if (!isOwner()) { state.tab = 'sell'; return renderSell(); }
+function updateHistoryResults() {
+  const resultsEl = document.getElementById('history-results');
+  const summaryEl = document.getElementById('history-summary');
+  if (!resultsEl) return;
 
-  renderShell(`
-    <h2 class="font-display text-lg mb-3">Full price list</h2>
-    <p class="text-sm text-ink/50 mb-4">Edit any price and press Save on that row. Leave a box blank if that medicine isn't sold that way.</p>
-    <div class="space-y-2 max-h-[70vh] overflow-y-auto pr-1">
-      ${state.medications.map(m => `
-        <div class="bg-white border border-black/5 rounded-xl p-3 flex flex-wrap items-center gap-2" data-row="${m.id}">
-          <div class="flex-1 min-w-[160px]">
-            <p class="font-medium text-sm">${m.name}</p>
-            <p class="text-xs text-ink/50">${m.category}</p>
+  const itemsBySale = new Map();
+  state.saleItems.forEach((it) => {
+    if (!itemsBySale.has(it.sale_id)) itemsBySale.set(it.sale_id, []);
+    itemsBySale.get(it.sale_id).push(it);
+  });
+
+  const nowMs = Date.now();
+  const q = state.historySearch.trim().toLowerCase();
+
+  const filtered = state.sales.filter((s) => {
+    if (state.historyPeriod !== 'all') {
+      const days = state.historyPeriod === 'today' ? 1 : Number(state.historyPeriod);
+      const created = new Date(s.created_at).getTime();
+      if ((nowMs - created) / 86400000 > days) return false;
+    }
+    if (!q) return true;
+    const sItems = itemsBySale.get(s.id) || [];
+    return (
+      String(s.sold_by_email || '').toLowerCase().includes(q) ||
+      sItems.some((it) => String(it.medication_name || '').toLowerCase().includes(q))
+    );
+  });
+
+  if (summaryEl) {
+    const rev = filtered.reduce((sum, s) => sum + Number(s.total || 0), 0);
+    summaryEl.textContent = `${filtered.length} sale(s) · Revenue: ${money(rev)}`;
+  }
+
+  if (filtered.length === 0) {
+    resultsEl.innerHTML = `<p class="text-sm text-ink/75 py-6 text-center card-surface bg-white rounded-xl border border-black/10">No sales found in this period.</p>`;
+    return;
+  }
+
+  resultsEl.innerHTML = filtered
+    .map((s) => {
+      const sItems = itemsBySale.get(s.id) || [];
+      return `
+        <article class="card-surface bg-white border border-black/10 rounded-xl p-4 space-y-2">
+          <div class="flex flex-wrap justify-between items-start gap-2">
+            <div>
+              <p class="text-xs font-medium text-ink/80">${esc(new Date(s.created_at).toLocaleString())}</p>
+              <p class="text-xs text-ink/75">Served by ${esc(s.sold_by_email)}</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <p class="font-bold text-base text-tealDark">${esc(money(s.total))}</p>
+              <button type="button" class="reprint-btn touch-target px-3 py-1.5 rounded-lg border border-black/20 text-xs font-semibold hover:bg-black/5" data-id="${esc(s.id)}">
+                Reprint Receipt
+              </button>
+            </div>
           </div>
-          <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_packet" placeholder="Packet" value="${m.price_packet ?? ''}" />
-          <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_box" placeholder="Box" value="${m.price_box ?? ''}" />
-          <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_card" placeholder="Card" value="${m.price_card ?? ''}" />
-          <input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_bottle" placeholder="Bottle" value="${m.price_bottle ?? ''}" />
-<input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_tube" placeholder="Tube" value="${m.price_tube ?? ''}" />
-<input class="price-input w-24 border border-black/10 rounded-lg px-2 py-1 text-sm" data-field="price_counting" placeholder="Counting" value="${m.price_counting ?? ''}" />
-          <button class="save-med-btn text-sm bg-teal hover:bg-tealDark text-white rounded-lg px-3 py-1.5" data-id="${m.id}">Save</button>
-        </div>
-      `).join('')}
-    </div>
-  `);
+          <div class="text-sm space-y-0.5 border-t border-black/10 pt-2">
+            ${sItems
+              .map(
+                (i) => `
+              <div class="flex justify-between gap-2">
+                <span>${esc(i.medication_name)} (${esc(i.qty_type)}) × ${i.quantity}</span>
+                <span class="font-medium">${esc(money(i.subtotal))}</span>
+              </div>`,
+              )
+              .join('')}
+          </div>
+        </article>`;
+    })
+    .join('');
 
-  document.querySelectorAll('.save-med-btn').forEach(btn => {
+  resultsEl.querySelectorAll('.reprint-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const sale = state.sales.find((s) => s.id === btn.dataset.id);
+      if (!sale) return;
+      state.lastReceipt = { sale, items: itemsBySale.get(sale.id) || [] };
+      state.viewingReceipt = true;
+      refreshTabBar();
+      renderReceiptView();
+    });
+  });
+}
+
+function renderHistoryTab() {
+  const panel = document.getElementById('tab-panel');
+  panel.innerHTML = `
+    <section class="space-y-4" aria-labelledby="hist-heading">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h2 id="hist-heading" class="font-display text-xl font-semibold text-tealDark">Sales History</h2>
+        <span id="history-summary" class="text-xs font-bold text-tealDark"></span>
+      </div>
+      <div class="card-surface bg-white border border-black/10 rounded-xl p-4 grid sm:grid-cols-3 gap-3">
+        <div class="sm:col-span-2">
+          <label for="history-search" class="block text-xs font-semibold mb-1">Search by medicine or staff email</label>
+          <input id="history-search" type="search" value="${esc(state.historySearch)}" placeholder="Search sales…"
+            class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+        </div>
+        <div>
+          <label for="history-period" class="block text-xs font-semibold mb-1">Timeframe</label>
+          <select id="history-period" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white">
+            <option value="today" ${state.historyPeriod === 'today' ? 'selected' : ''}>Last 24 Hours</option>
+            <option value="7" ${state.historyPeriod === '7' ? 'selected' : ''}>Last 7 Days</option>
+            <option value="30" ${state.historyPeriod === '30' ? 'selected' : ''}>Last 30 Days</option>
+            <option value="all" ${state.historyPeriod === 'all' ? 'selected' : ''}>All Recorded</option>
+          </select>
+        </div>
+      </div>
+      <div id="history-results" class="space-y-3"></div>
+    </section>
+  `;
+
+  document.getElementById('history-search').addEventListener('input', (e) => {
+    state.historySearch = e.target.value;
+    updateHistoryResults();
+  });
+  document.getElementById('history-period').addEventListener('change', (e) => {
+    state.historyPeriod = e.target.value;
+    updateHistoryResults();
+  });
+
+  updateHistoryResults();
+}
+
+// ---------------------------------------------------------
+// TAB 7: PRICE LIST ADMIN (Owner Only — Searchable + Cleanups)
+// ---------------------------------------------------------
+function updateAdminResults() {
+  const resultsEl = document.getElementById('admin-results');
+  if (!resultsEl) return;
+
+  const q = state.adminSearch.trim();
+  const list = state.medications.filter((m) => {
+    const meta = inferGenericAndCompany(m);
+    if (state.adminCategory !== 'All' && m.category !== state.adminCategory) return false;
+    if (state.adminCompany !== 'All' && meta.company !== state.adminCompany) return false;
+    if (state.adminMissingOnly && getAllAvailablePrices(m).length > 0) return false;
+    if (q && fuzzyScore(q, m) < 55) return false;
+    return true;
+  });
+
+  resultsEl.innerHTML =
+    list
+      .map((m) => {
+        const meta = inferGenericAndCompany(m);
+        const buyCost = m.last_buy_unit_price;
+        const anyBelow = buyCost != null && getAllAvailablePrices(m).some((p) => isBelowCost(p.unitPrice, buyCost));
+        return `
+          <article class="card-surface bg-white border border-black/10 rounded-xl p-4 space-y-3" data-row="${esc(m.id)}">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 class="font-semibold text-base">${esc(m.name)}</h3>
+                ${
+                  buyCost != null
+                    ? `<p class="text-xs font-medium ${anyBelow ? 'text-red-800 font-bold' : 'text-tealDark'}">
+                        Last Buy Cost: ${esc(money(buyCost))} ${anyBelow ? '— ⚠ A selling price below is at/below cost!' : ''}
+                      </p>`
+                    : `<p class="text-xs text-ink/70">No Purchase Book cost recorded yet</p>`
+                }
+              </div>
+              <button type="button" class="save-med-btn touch-target bg-teal hover:bg-tealDark text-white text-sm font-semibold rounded-lg px-4 py-2" data-id="${esc(m.id)}">
+                Save Row
+              </button>
+            </div>
+
+            <div class="grid sm:grid-cols-5 gap-2">
+              <div>
+                <label class="block text-xs font-semibold mb-1">Category</label>
+                <input class="meta-input touch-target w-full border border-black/20 rounded-lg px-2.5 py-1.5 text-sm bg-white" data-field="category" value="${esc(m.category || 'Other')}" />
+              </div>
+              <div>
+                <label class="block text-xs font-semibold mb-1">Company</label>
+                <input class="meta-input touch-target w-full border border-black/20 rounded-lg px-2.5 py-1.5 text-sm bg-white" data-field="company" placeholder="e.g. Berlin" value="${esc(m.company || meta.company || '')}" />
+              </div>
+              <div>
+                <label class="block text-xs font-semibold mb-1">Generic</label>
+                <input class="meta-input touch-target w-full border border-black/20 rounded-lg px-2.5 py-1.5 text-sm bg-white" data-field="generic_name" placeholder="e.g. Amlodipine" value="${esc(m.generic_name || meta.generic || '')}" />
+              </div>
+              <div>
+                <label class="block text-xs font-semibold mb-1">Stock Qty</label>
+                <input type="number" min="0" class="int-input touch-target w-full border border-black/20 rounded-lg px-2.5 py-1.5 text-sm bg-white" data-field="stock_qty" placeholder="Untracked" value="${m.stock_qty ?? ''}" />
+              </div>
+              <div>
+                <label class="block text-xs font-semibold mb-1">Reorder Below</label>
+                <input type="number" min="0" class="int-input touch-target w-full border border-black/20 rounded-lg px-2.5 py-1.5 text-sm bg-white" data-field="reorder_level" value="${m.reorder_level ?? 5}" />
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-6 gap-2">
+              ${UNIT_TYPES.map(
+                (u) => `
+                <div>
+                  <label class="block text-xs font-semibold mb-1">${u.charAt(0).toUpperCase() + u.slice(1)}</label>
+                  <input type="number" step="0.01" min="0" class="price-input touch-target w-full border border-black/20 rounded-lg px-2.5 py-1.5 text-sm bg-white"
+                    data-field="price_${u}" placeholder="₦" value="${m['price_' + u] ?? ''}" />
+                </div>`,
+              ).join('')}
+            </div>
+          </article>`;
+      })
+      .join('') || `<p class="text-sm text-ink/75 py-6 text-center">No medications match those filters.</p>`;
+
+  resultsEl.querySelectorAll('.save-med-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const row = document.querySelector(`[data-row="${btn.dataset.id}"]`);
+      const id = btn.dataset.id;
+      const row = resultsEl.querySelector(`[data-row="${id}"]`);
+      const med = state.medications.find((x) => x.id === id);
       const update = {};
-      row.querySelectorAll('.price-input').forEach(inp => {
+
+      row.querySelectorAll('.meta-input').forEach((inp) => {
+        const val = inp.value.trim();
+        update[inp.dataset.field] = inp.dataset.field === 'category' ? val || 'Other' : val || null;
+      });
+      row.querySelectorAll('.int-input').forEach((inp) => {
+        if (inp.dataset.field === 'reorder_level') {
+          update.reorder_level = inp.value === '' ? 5 : Math.max(0, Math.round(Number(inp.value)));
+        } else {
+          update.stock_qty = inp.value === '' ? null : Math.max(0, Math.round(Number(inp.value)));
+        }
+      });
+      row.querySelectorAll('.price-input').forEach((inp) => {
         update[inp.dataset.field] = inp.value === '' ? null : Number(inp.value);
       });
-      const { error } = await supabase.from('medications').update(update).eq('id', btn.dataset.id);
-      if (error) alert('Could not save: ' + error.message);
-      else { await loadMedications(); renderAdmin(); }
+
+      const buyCost = med?.last_buy_unit_price;
+      const badSell =
+        buyCost != null &&
+        UNIT_TYPES.some((u) => update['price_' + u] !== null && isBelowCost(update['price_' + u], buyCost));
+
+      if (badSell) {
+        const proceed = await confirmModal({
+          title: 'Price Below Purchase Cost',
+          message: `One of the prices you entered is AT OR BELOW the Purchase Book buy cost (${money(buyCost)}). Save anyway?`,
+          confirmLabel: 'Save Anyway',
+          danger: true,
+          triggerEl: btn,
+        });
+        if (!proceed) return;
+      }
+
+      const { error } = await supabase.from('medications').update(update).eq('id', id);
+      if (error) showToast('Could not save row: ' + error.message, 'error');
+      else {
+        await loadMedications();
+        updateAdminResults();
+        showToast(`Updated ${med?.name || 'medication'}!`, 'success');
+      }
     });
   });
 }
 
+async function runAdminCleanup(triggerEl) {
+  const categoryMap = {
+    other: 'Other',
+    bp: 'Blood Pressure (BP)',
+    typhoid: 'Typhoid / Antibiotic',
+    skin: 'Skin / Topical',
+    infection: 'Antibiotic',
+  };
+  const existingTrimmed = new Set(state.medications.map((m) => m.name.trim().toLowerCase()));
+  const updates = [];
+
+  for (const m of state.medications) {
+    const patch = {};
+    const lowCat = String(m.category || '').trim().toLowerCase();
+    if (categoryMap[lowCat] && m.category !== categoryMap[lowCat]) {
+      patch.category = categoryMap[lowCat];
+    }
+    const trimmedName = m.name.trim();
+    if (trimmedName !== m.name) {
+      const collides = state.medications.some((other) => other.id !== m.id && other.name.trim().toLowerCase() === trimmedName.toLowerCase());
+      if (!collides && existingTrimmed.has(trimmedName.toLowerCase())) {
+        patch.name = trimmedName;
+      }
+    }
+    if (Object.keys(patch).length > 0) updates.push({ id: m.id, patch });
+  }
+
+  if (updates.length === 0) {
+    showToast('Categories and names already look clean!', 'info');
+    return;
+  }
+
+  const ok = await confirmModal({
+    title: 'Clean Up Categories & Spaces?',
+    message: `Normalize ${updates.length} item(s) (e.g. "other" → "Other", "bp" → "Blood Pressure (BP)", trim leading/trailing spaces)? Prices stay 100% untouched.`,
+    confirmLabel: `Clean ${updates.length} Items`,
+    triggerEl,
+  });
+  if (!ok) return;
+
+  for (const u of updates) {
+    await supabase.from('medications').update(u.patch).eq('id', u.id);
+  }
+  await loadMedications();
+  renderAdminTab();
+  showToast(`Cleaned up ${updates.length} medication records!`, 'success');
+}
+
+function renderAdminTab() {
+  if (!isOwner()) return switchTab('sell');
+  const panel = document.getElementById('tab-panel');
+  const categories = ['All', ...new Set(state.medications.map((m) => m.category)).values()];
+  const companies = getAllCompaniesList();
+
+  panel.innerHTML = `
+    <section class="space-y-4" aria-labelledby="admin-heading">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 id="admin-heading" class="font-display text-xl font-semibold text-tealDark">Full Price List (Owner Admin)</h2>
+          <p class="text-xs text-ink/80">Edit retail prices, brands/companies, generic names, and stock counts directly.</p>
+        </div>
+        <button type="button" id="admin-cleanup-btn" class="touch-target px-4 py-2 rounded-lg border border-teal text-tealDark text-xs font-semibold hover:bg-teal/10">
+          Clean Up Categories &amp; Spaces
+        </button>
+      </div>
+
+      <div class="card-surface bg-white border border-black/10 rounded-xl p-4 grid sm:grid-cols-12 gap-3 items-end">
+        <div class="sm:col-span-4">
+          <label for="admin-search" class="block text-xs font-semibold mb-1">Search admin list</label>
+          <input id="admin-search" type="search" value="${esc(state.adminSearch)}" placeholder="Search medicine or company…"
+            class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white" />
+        </div>
+        <div class="sm:col-span-3">
+          <label for="admin-cat" class="block text-xs font-semibold mb-1">Category</label>
+          <select id="admin-cat" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white">
+            ${categories.map((c) => `<option value="${esc(c)}" ${c === state.adminCategory ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="sm:col-span-3">
+          <label for="admin-comp" class="block text-xs font-semibold mb-1">Company</label>
+          <select id="admin-comp" class="touch-target w-full border border-black/20 rounded-lg px-3 py-2 bg-white">
+            ${companies.map((c) => `<option value="${esc(c)}" ${c === state.adminCompany ? 'selected' : ''}>${esc(c)}</option>`).join('')}
+          </select>
+        </div>
+        <label class="sm:col-span-2 touch-target inline-flex items-center gap-2 text-xs font-semibold cursor-pointer">
+          <input id="admin-missing" type="checkbox" ${state.adminMissingOnly ? 'checked' : ''} class="w-4 h-4 accent-teal" />
+          Missing price
+        </label>
+      </div>
+
+      <div id="admin-results" class="space-y-3 max-h-[70vh] overflow-y-auto pr-1"></div>
+    </section>
+  `;
+
+  document.getElementById('admin-search').addEventListener('input', (e) => {
+    state.adminSearch = e.target.value;
+    updateAdminResults();
+  });
+  document.getElementById('admin-cat').addEventListener('change', (e) => {
+    state.adminCategory = e.target.value;
+    updateAdminResults();
+  });
+  document.getElementById('admin-comp').addEventListener('change', (e) => {
+    state.adminCompany = e.target.value;
+    updateAdminResults();
+  });
+  document.getElementById('admin-missing').addEventListener('change', (e) => {
+    state.adminMissingOnly = e.target.checked;
+    updateAdminResults();
+  });
+  document.getElementById('admin-cleanup-btn').addEventListener('click', (e) => runAdminCleanup(e.currentTarget));
+
+  updateAdminResults();
+}
+
 // ---------------------------------------------------------
-// Router
+// Router & Auth State Binding
 // ---------------------------------------------------------
+function renderActiveTabPanel() {
+  if (state.viewingReceipt) return renderReceiptView();
+  if (state.tab === 'sell') return renderSellTab();
+  if (state.tab === 'purchase') return renderPurchaseBookTab();
+  if (state.tab === 'restock') return renderRestockTab();
+  if (state.tab === 'ai') return renderAssistantTab();
+  if (state.tab === 'suggestions') return renderSuggestionsTab();
+  if (state.tab === 'history') return renderHistoryTab();
+  if (state.tab === 'admin') return renderAdminTab();
+  state.tab = 'sell';
+  return renderSellTab();
+}
+
 function render() {
   if (!state.session) return renderAuth();
-  if (state.tab === 'sell') return renderSell();
-  if (state.tab === 'history') return renderHistory();
-  if (state.tab === 'suggestions') return renderSuggestions();
-  if (state.tab === 'admin') return renderAdmin();
+  mountShell();
+  renderActiveTabPanel();
 }
 
 supabase.auth.onAuthStateChange(async (_event, session) => {
   state.session = session;
   if (session) {
     await loadProfile();
-    await loadMedications();
+    await loadAllData();
   }
   render();
 });

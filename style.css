@@ -1,12 +1,195 @@
-body { font-family: 'Inter', sans-serif; }
-.font-display { font-family: 'Fraunces', serif; }
+:root {
+  --focus-ring: #0E7C7B;
+}
 
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #cbd5c9; border-radius: 4px; }
+html[data-text-size="normal"] {
+  font-size: 16px;
+}
+
+html[data-text-size="large"] {
+  font-size: 18px;
+}
+
+html[data-text-size="xlarge"] {
+  font-size: 20px;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+}
+
+.font-display {
+  font-family: 'Fraunces', serif;
+}
+
+/* Skip link for keyboard navigation */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0.75rem;
+  z-index: 100;
+  background: #0B5F5E;
+  color: #ffffff;
+  font-weight: 600;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  left: 0.75rem;
+  outline: 3px solid #F59E0B;
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Strong WCAG 2.1 AA focus outlines */
+:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Minimum 44px touch targets for busy counter screens */
+.touch-target {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* Easy-Read spacing mode */
+html[data-readable="true"] body {
+  line-height: 1.65;
+  letter-spacing: 0.018em;
+  word-spacing: 0.08em;
+}
+
+/* High-Contrast WCAG AAA mode */
+html[data-contrast="high"] {
+  --focus-ring: #D97706;
+}
+
+html[data-contrast="high"] body {
+  background-color: #FFFFFF !important;
+  color: #000000 !important;
+}
+
+html[data-contrast="high"] .bg-white,
+html[data-contrast="high"] .bg-white\/60,
+html[data-contrast="high"] .bg-sand {
+  background-color: #FFFFFF !important;
+}
+
+html[data-contrast="high"] .card-surface {
+  background-color: #FFFFFF !important;
+  border: 2px solid #000000 !important;
+  box-shadow: none !important;
+}
+
+html[data-contrast="high"] .text-ink,
+html[data-contrast="high"] .text-ink\/80,
+html[data-contrast="high"] .text-ink\/70,
+html[data-contrast="high"] .text-ink\/60,
+html[data-contrast="high"] .text-ink\/50,
+html[data-contrast="high"] .text-ink\/40,
+html[data-contrast="high"] .text-slate-600,
+html[data-contrast="high"] .text-slate-500 {
+  color: #000000 !important;
+}
+
+html[data-contrast="high"] .text-tealDark,
+html[data-contrast="high"] .text-teal {
+  color: #004D4C !important;
+}
+
+html[data-contrast="high"] .bg-teal {
+  background-color: #004D4C !important;
+  color: #FFFFFF !important;
+}
+
+html[data-contrast="high"] .border-black\/5,
+html[data-contrast="high"] .border-black\/10,
+html[data-contrast="high"] .border-black\/15,
+html[data-contrast="high"] .border-slate-200 {
+  border-color: #000000 !important;
+}
+
+html[data-contrast="high"] input,
+html[data-contrast="high"] select,
+html[data-contrast="high"] textarea {
+  background-color: #FFFFFF !important;
+  color: #000000 !important;
+  border: 2px solid #000000 !important;
+}
+
+html[data-contrast="high"] button:not(.bg-teal):not(.bg-red-700):not(.bg-amber-700) {
+  border-color: #000000 !important;
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 4px;
+}
 
 @media print {
-  body * { visibility: hidden; }
-  #receipt-print, #receipt-print * { visibility: visible; }
-  #receipt-print { position: fixed; top: 0; left: 0; width: 100%; }
-  .no-print { display: none !important; }
+  .no-print {
+    display: none !important;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+
+  body[data-print-target="receipt"] #receipt-print,
+  body[data-print-target="receipt"] #receipt-print * {
+    visibility: visible;
+  }
+
+  body[data-print-target="receipt"] #receipt-print {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    border: none !important;
+    box-shadow: none !important;
+  }
+
+  body[data-print-target="restock"] #restock-print,
+  body[data-print-target="restock"] #restock-print * {
+    visibility: visible;
+  }
+
+  body[data-print-target="restock"] #restock-print {
+    display: block !important;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    border: none !important;
+    box-shadow: none !important;
+  }
 }
