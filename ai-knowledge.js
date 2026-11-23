@@ -576,6 +576,138 @@ export const DRUG_REFERENCE = [
   },
 ];
 
+export const NIGERIA_MARKET_BRANDS = {
+  paracetamol: [
+    'Panadol (GSK)', 'Emzor Paracetamol (Emzor)', 'M&B Paracetamol (May & Baker)',
+    'Panda Paracetamol (Panda)', 'Dana Paracetamol (Dana)', 'Fidson Paracetamol (Fidson)',
+    'Boska (Paracetamol/Caffeine)',
+  ],
+  ibuprofen: [
+    'Brufen (Abbott)', 'Brustan-N (Sun Pharma)', 'Ibucap (Emzor)',
+    'Emzor Ibuprofen (Emzor)', 'Juhel Ibuprofen (Juhel)',
+  ],
+  diclofenac: [
+    'Cataflam (Novartis)', 'Voltaren (Novartis)', 'Clofenac', 'Emzor Diclofenac (Emzor)', 'Olfen (Mepha)',
+  ],
+  aspirin: [
+    'Anacin', 'Vasoprin (Juhel)', 'Emzor Aspirin (Emzor)', 'Cardiprin',
+  ],
+  amoxicillin: [
+    'Amoxil (GSK)', 'Emoxil (Emzor)', 'Moxipen', 'Tuyil Amoxicillin (Tuyil)',
+    'Fidson Amoxicillin (Fidson)', 'Juhel Amoxicillin (Juhel)', 'Bond Amoxicillin',
+  ],
+  amox_clav: [
+    'Augmentin (GSK)', 'Aquaclav', 'Fleming (Medico)', 'Amoksiklav (Sandoz)',
+    'Clavam (Alkem)', 'Moxikind-CV (Mankind)',
+  ],
+  ampiclox: [
+    'Ampiclox (GSK)', 'Emzor Ampiclox (Emzor)', 'Fidson Ampiclox (Fidson)',
+    'Tuyil Ampiclox (Tuyil)', 'Juhel Ampiclox (Juhel)',
+  ],
+  azithromycin: [
+    'Zithromax (Pfizer)', 'Azithro (Emzor)', 'Zimax', 'Azipro (Fidson)', 'Azee (Cipla)',
+  ],
+  ciprofloxacin: [
+    'Ciprotab (Fidson)', 'Ciprobay (Bayer)', 'Ciprolex', 'Emzor Ciprofloxacin (Emzor)',
+    'Juhel Ciprofloxacin (Juhel)', 'Ciprodac',
+  ],
+  erythromycin: [
+    'Erymed (Erymed)', 'Erythrocin', 'Emzor Erythromycin (Emzor)', 'Juhel Erythromycin (Juhel)',
+  ],
+  metronidazole: [
+    'Flagyl (Sanofi)', 'Loxagyl (May & Baker)', 'Emzor Metronidazole (Emzor)', 'Juhel Metronidazole (Juhel)',
+  ],
+  cefuroxime: [
+    'Zinnat (GSK)', 'Cefux', 'Oratil', 'Axacef (Fidson)',
+  ],
+  artemether_lumefantrine: [
+    'Coartem (Novartis)', 'Lonart / Lonart DS (Bliss GVS)', 'Amatem / Amatem Forte (Elbe)',
+    'Lumartem (Cipla)', 'Lokmal (Emzor)', 'Combiart (Strides)', 'Coflin', 'Artecom',
+  ],
+  amodiaquine: [
+    'Camoquin (Pfizer)', 'Larimal (Ipca)', 'Camosunate (Geneith)', 'Arsuamoon (Guilin)',
+  ],
+  sp_malaria: [
+    'Fansidar (Roche/Swipha)', 'Amalar (Elbe)', 'Maloxine (Bliss GVS)', 'Swidar (Swipha)',
+  ],
+  amlodipine: [
+    'Norvasc (Pfizer)', 'Amlovas (Macleods)', 'Amlong (Micro Labs)',
+    'Berlin Amlodipine (Berlin)', 'Teva Amlodipine (Teva)', 'Amlovar',
+    'Emzor Amlodipine (Emzor)', 'Fidson Amlodipine (Fidson)', 'Amlokind',
+  ],
+  lisinopril: [
+    'Zestril (AstraZeneca)', 'Lisopril (Teva)', 'Fidson Lisinopril (Fidson)', 'Emzor Lisinopril (Emzor)',
+  ],
+  nifedipine: [
+    'Adalat LA (Bayer)', 'Nifecard XL', 'Normif (Fidson)', 'Nifedipine Retard (Berlin/Teva)',
+  ],
+  metformin: [
+    'Glucophage (Merck)', 'Biophage (Biophage)', 'Gluformin', 'Diabetmin (Hovid)',
+    'Emzor Metformin (Emzor)', 'Fidson Metformin (Fidson)',
+  ],
+  omeprazole: [
+    'Losec (AstraZeneca)', 'Omepraz', 'Acipep', 'Ulcerx', 'Fidson Omeprazole (Fidson)', 'Emzor Omeprazole (Emzor)',
+  ],
+  antacid: [
+    'Gaviscon (Reckitt)', 'Gestid (Ranbaxy/Sun)', 'Mist Mag (Emzor / DM / Tuyil)',
+    'Avrocid (Avro)', 'Gecrol', 'Gelusil (Pfizer)', 'Jawasil',
+  ],
+  loratadine_cetirizine: [
+    'Clarityn (Bayer)', 'Zyrtec (UCB)', 'Loratyn (Emzor)', 'Cetzine', 'Cetirizine (Teva / Fidson)',
+  ],
+  chlorpheniramine: [
+    'Piriton (GSK)', 'Emzor Piriton / Chlorpheniramine (Emzor)', 'Juhel Chlorpheniramine (Juhel)',
+  ],
+  cough_syrup: [
+    'Benylin (Johnson & Johnson)', 'Emzolyn (Emzor)', 'Tuxil-N', 'Cofmix (Fidson)', 'Coflin', 'Tutolin',
+  ],
+  salbutamol: [
+    'Ventolin (GSK)', 'Asthalin (Cipla)', 'Salbu', 'Emzor Salbutamol (Emzor)',
+  ],
+  vitamin_c: [
+    'Emzor Vitamin C (Emzor)', 'Jawacare Vitamin C', 'Juhel Vitamin C (Juhel)', 'Ascorbic Acid (M&B / Fidson)',
+  ],
+  b_complex: [
+    'Becombion (Merck/Becombion)', 'Zetup B-Complex (Zetup)', 'Neurobion (P&G/Merck)',
+    'Emzor B-Complex (Emzor)', 'B-Vital (Fidson)',
+  ],
+  multivitamin: [
+    'Abidec (Omega Pharma)', 'Astymin (Tablets India)', 'Wellkid / Wellman / Wellwoman (Vitabiotics)',
+    'Supradyn (Bayer)', 'Revite', 'Emvite (Emzor)',
+  ],
+  cyproheptadine_appetite: [
+    'Apetamin', 'Cyprivit', 'Avroapetit (Avro)', 'Cypromin', 'Periactin',
+  ],
+  iron_tonic: [
+    'Feroglobin (Vitabiotics)', 'Chemiron', 'Ranferon-12 (Sun Pharma)', 'Astifer (Fidson)', 'Bunto', 'Bioferon',
+  ],
+  cod_liver_oil: [
+    'Seven Seas (Merck/Seven Seas)', 'Nine Seas (Nine Seas)', 'Omega-H3 (Vitabiotics)', 'Maxirich / Carlson',
+  ],
+  antifungal_cream: [
+    'Canesten (Bayer)', 'Clotrimazole (Emzor / Tuyil)', 'Nizoral (Janssen)', 'Fungusol', 'Mycoten',
+  ],
+  triple_action_cream: [
+    'Skineal', 'Funbact-A', 'Tribotan', 'Epiderm', 'Nixoderm', 'Mycoderm',
+  ],
+  topical_balm: [
+    'Neurogesic', 'Robb (PZ Cussons)', 'Aboniki Balm', 'Mentholatum', 'Deep Heat', 'Fastum Gel',
+  ],
+  ors: [
+    'Oral Drip (Orbs)', 'Emzor ORS (Emzor)', 'Drip ORS', 'Fidson ORS (Fidson)', 'WHO Low-Osmolarity ORS',
+  ],
+  albendazole: [
+    'Zentel (GSK)', 'Wormplex', 'Emzor Albendazole (Emzor)', 'Combantrin', 'Nemozole',
+  ],
+  klovinal_vaginal: [
+    'Klovinal', 'Canesten V6 (Bayer)', 'Flagyl / Mycoten Combo Pessary', 'Gyno-Daktarin',
+  ],
+};
+
+DRUG_REFERENCE.forEach((d) => {
+  d.nigeriaMarketBrands = NIGERIA_MARKET_BRANDS[d.id] || [];
+});
+
 export function esc(str) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')
@@ -1273,24 +1405,52 @@ export function runLocalAssistant({
     };
   }
 
-  // 3. Company / Brand Comparison Query
-  if (modeHint === 'brands' || /\b(compan|brand|manufacturer|which .* do we have|same drug|alternative|substitute|berlin|teva)\b/i.test(qLow)) {
+  // 3. Company / Brand Comparison & Nigerian Market Circulation Query
+  if (modeHint === 'brands' || /\b(compan|brand|manufacturer|which .* do we have|circulat|nigeria|don't have|dont have|not on.*shelf|same drug|alternative|substitute|berlin|teva)\b/i.test(qLow)) {
     const matchedMeds = medication ? [medication] : findMatchingMeds(q, meds, 6);
-    if (matchedMeds.length > 0) {
-      const brands = findSameDrugBrands(matchedMeds[0], meds);
-      const targetMeta = inferGenericAndCompany(matchedMeds[0]);
-      const lines = brands.map(b => {
+    const directRef = medication ? matchDrugReference(medication) : matchDrugReference(q);
+    const ref = directRef || (matchedMeds[0] ? matchDrugReference(matchedMeds[0]) : null);
+
+    if (matchedMeds.length > 0 || ref) {
+      const brands = matchedMeds.length > 0 ? findSameDrugBrands(matchedMeds[0], meds) : [];
+      const targetMeta = matchedMeds[0] ? inferGenericAndCompany(matchedMeds[0]) : { generic: ref?.generic || '' };
+      const topicName = targetMeta.generic || ref?.generic || matchedMeds[0]?.name || q;
+
+      const shelfLines = brands.map(b => {
         const bm = inferGenericAndCompany(b);
         const prices = getAllAvailablePrices(b).map(p => `${p.qtyType} ${money(p.unitPrice)}`).join(', ') || 'No price set';
         const stockLabel = b.stock_qty != null ? `Stock: ${b.stock_qty}` : 'Stock untracked';
-        return `• ${b.name} — Company: ${bm.company || 'Unlabeled'} · ${prices} · ${stockLabel}`;
+        return `* **${b.name}** — Company: ${bm.company || 'Unlabeled'} · ${prices} · ${stockLabel}`;
       });
-      actions.push({ type: 'compare_brands', medicationId: matchedMeds[0].id, label: `Open side-by-side comparison (${brands.length})` });
+
+      const shelfTextNorm = normalizeText(brands.map(b => `${b.name} ${inferGenericAndCompany(b).company}`).join(' '));
+      const marketBrands = (ref?.nigeriaMarketBrands || []).filter(mb => {
+        const mbTokens = normalizeText(mb).split(' ').filter(t => t.length >= 4);
+        return !mbTokens.some(t => shelfTextNorm.includes(t) && !normalizeText(topicName).includes(t));
+      });
+
+      if (brands.length > 0) {
+        actions.push({ type: 'compare_brands', medicationId: matchedMeds[0].id, label: `Compare ${brands.length} on shelf` });
+      }
+
+      const answerParts = [];
+      answerParts.push(`### Currently on Your Shelf`);
+      if (shelfLines.length > 0) {
+        answerParts.push(shelfLines.join('\n'));
+      } else {
+        answerParts.push(`* No ${topicName} products matched directly on your current shelf list.`);
+      }
+
+      if (marketBrands.length > 0) {
+        answerParts.push(`### Other Popular Brands Circulating in Nigeria (Not on Your Shelf)\n` +
+          marketBrands.map(b => `* ${b}`).join('\n') +
+          `\n* Always verify a valid **NAFDAC Reg. No.** and purchase from licensed wholesale distributors.`);
+      }
 
       return {
         mode: 'local',
-        title: `Companies on Shelf — ${targetMeta.generic || matchedMeds[0].name}`,
-        answer: `Found ${brands.length} product(s) on your shelf matching ${targetMeta.generic || matchedMeds[0].name}:\n${lines.join('\n')}`,
+        title: `Companies & Nigerian Market — ${topicName}`,
+        answer: answerParts.join('\n\n'),
         sections,
         actions,
         matchedMeds: brands,
@@ -1446,6 +1606,7 @@ export function runLocalAssistant({
 export async function askPharmacyAI({
   supabase,
   question,
+  history = [],
   modeHint = null,
   medication = null,
   meds = [],
@@ -1481,6 +1642,20 @@ export async function askPharmacyAI({
         prices: getAllAvailablePrices(m),
       };
     });
+
+  const fullCatalogSummary = meds
+    .map(m => {
+      const meta = inferGenericAndCompany(m);
+      const prices = getAllAvailablePrices(m).map(p => `${p.qtyType}:${p.unitPrice}`).join(',') || 'unpriced';
+      const parts = [m.name, m.category];
+      if (meta.company) parts.push(`Co:${meta.company}`);
+      if (meta.generic) parts.push(`Gen:${meta.generic}`);
+      parts.push(prices);
+      if (m.last_buy_unit_price != null) parts.push(`buy:${m.last_buy_unit_price}`);
+      if (m.stock_qty != null) parts.push(`stk:${m.stock_qty}`);
+      return parts.join(' | ');
+    })
+    .join('\n');
 
   const medIds = new Set((localResult.matchedMeds || []).map(m => m.id));
   const purchaseContext = purchaseEntries
@@ -1518,6 +1693,7 @@ export async function askPharmacyAI({
     const { data, error } = await supabase.functions.invoke('pharmacy-ai', {
       body: {
         question,
+        history: (history || []).slice(-6),
         modeHint,
         medication: medication ? {
           name: medication.name,
@@ -1527,6 +1703,7 @@ export async function askPharmacyAI({
           prices: getAllAvailablePrices(medication),
         } : null,
         catalogContext: contextMeds,
+        fullCatalogSummary,
         purchaseContext,
         restockContext,
       },
@@ -1536,6 +1713,7 @@ export async function askPharmacyAI({
       return {
         ...localResult,
         mode: 'gemini',
+        model: data.model || null,
         geminiConfigured: true,
         answer: data.answer,
         sections: [],
