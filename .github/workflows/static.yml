@@ -34,10 +34,12 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           # Upload entire repository
           path: '.'
+      - name: Wait for artifact indexing
+        run: sleep 5
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
