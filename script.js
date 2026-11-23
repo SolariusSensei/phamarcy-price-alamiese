@@ -15,6 +15,10 @@ import {
   askPharmacyAI,
   formatAiMarkdownHtml,
   stripMarkdownForSpeech,
+  STANDARD_CATEGORIES,
+  getCanonicalCategoryList,
+  autoCategorizeMedication,
+  batchAutoCategorizeMedications,
 } from './ai-knowledge.js';
 
 // =========================================================
@@ -1495,6 +1499,7 @@ function updatePurchaseResults() {
 function renderPurchaseBookTab() {
   const panel = document.getElementById('tab-panel');
   const pbCompanies = ['All', ...new Set(state.purchaseEntries.map((p) => p.company || 'Unlabeled'))];
+  const pbCategories = getCanonicalCategoryList(state.medications);
   const todayStr = new Date().toISOString().slice(0, 10);
 
   panel.innerHTML = `
@@ -1524,7 +1529,15 @@ function renderPurchaseBookTab() {
             </div>
             <div>
               <label for="pb-new-cat" class="block text-xs font-semibold mb-1">Category</label>
-              <input id="pb-new-cat" type="text" value="Other" placeholder="Pain Relief, Antibiotic…" class="touch-target w-full border border-black/20 rounded-xl px-3 py-2 bg-white" />
+              <input id="pb-new-cat" type="text" list="pb-cat-list" value="" placeholder="Auto-detect or choose…" class="touch-target w-full border border-black/20 rounded-xl px-3 py-2 bg-white" />
+              <datalist id="pb-cat-list">${pbCategories.map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
+            </div>
+            <div class="sm:col-span-2 flex flex-wrap items-center justify-between gap-2">
+              <button type="button" id="pb-ai-cat-btn"
+                class="touch-target inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-teal/40 bg-mint/50 text-tealDark text-xs font-semibold hover:bg-mint transition">
+                ${ICONS.ai}<span>AI Auto-Category &amp; Info</span>
+              </button>
+              <span id="pb-ai-cat-note" class="text-xs text-tealDark font-medium hidden" aria-live="polite"></span>
             </div>
           </div>
 
@@ -1640,6 +1653,10 @@ function renderPurchaseBookTab() {
 
   const medSelect = document.getElementById('pb-med');
   const newMedFields = document.getElementById('pb-new-med-fields');
+  const pbNewNameInput = document.getElementById('pb-new-name');
+  const pbNewCatInput = document.getElementById('pb-new-cat');
+  const pbAiCatBtn = document.getElementById('pb-ai-cat-btn');
+  const pbAiCatNote = document.getElementById('pb-ai-cat-note');
   const compInput = document.getElementById('pb-company');
   const genInput = document.getElementById('pb-generic');
   const qtyInput = document.getElementById('pb-qty');
@@ -1651,6 +1668,57 @@ function renderPurchaseBookTab() {
   const sellWrap = document.getElementById('pb-sell-wrap');
   const sellPriceInput = document.getElementById('pb-sell-price');
   const belowWarn = document.getElementById('pb-below-warn');
+  let pbCatTouched = false;
+
+  pbNewCatInput.addEventListener('input', () => {
+    const v = pbNewCatInput.value.trim().toLowerCase();
+    pbCatTouched = Boolean(v && v !== 'other');
+  });
+
+  async function runPbAutoCategory(manual = false) {
+    const name = pbNewNameInput.value.trim();
+    if (!name) {
+      if (manual) showToast('Type the new medicine name first.', 'warn');
+      return;
+    }
+    const origHtml = pbAiCatBtn.innerHTML;
+    pbAiCatBtn.disabled = true;
+    pbAiCatBtn.innerHTML = `${ICONS.ai}<span>Detecting…</span>`;
+    try {
+      const res = await autoCategorizeMedication({
+        supabase,
+        name,
+        existingCategories: pbCategories,
+      });
+      if (!document.body.contains(pbNewCatInput)) return;
+      pbNewCatInput.value = res.category || 'Other';
+      pbCatTouched = false;
+      if (!compInput.value.trim() && res.company) compInput.value = res.company;
+      if (!genInput.value.trim() && res.generic_name) genInput.value = res.generic_name;
+      const via = res.mode === 'gemini' ? `Gemini Cloud AI${res.model ? ` (${res.model})` : ''}` : 'Smart Classifier';
+      pbAiCatNote.textContent = `${via}: ${res.category} — ${res.reason}`;
+      pbAiCatNote.classList.remove('hidden');
+      if (manual) {
+        showToast(
+          `Detected category: ${res.category}${res.company ? ` (${res.company})` : ''}`,
+          res.category !== 'Other' ? 'success' : 'info',
+        );
+      }
+    } finally {
+      if (document.body.contains(pbAiCatBtn)) {
+        pbAiCatBtn.disabled = false;
+        pbAiCatBtn.innerHTML = origHtml;
+      }
+    }
+  }
+
+  pbAiCatBtn.addEventListener('click', () => runPbAutoCategory(true));
+  pbNewNameInput.addEventListener('blur', () => {
+    const cur = pbNewCatInput.value.trim().toLowerCase();
+    if (!medSelect.value && !pbCatTouched && (!cur || cur === 'other')) {
+      runPbAutoCategory(false);
+    }
+  });
 
   function syncMedSelection() {
     state.pbSelectedMedId = medSelect.value;
@@ -2405,7 +2473,7 @@ function renderAssistantTab() {
 // ---------------------------------------------------------
 function renderSuggestionsTab() {
   const panel = document.getElementById('tab-panel');
-  const categories = [...new Set(state.medications.map((m) => m.category))];
+  const categories = getCanonicalCategoryList(state.medications);
   const draft = state.suggestionDraft;
 
   panel.innerHTML = `
@@ -2444,6 +2512,14 @@ function renderSuggestionsTab() {
           </div>
 
           <div id="s-buy-cost-banner" class="hidden rounded-xl bg-mint/50 border border-teal/25 px-3 py-2 text-xs"></div>
+
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <button type="button" id="s-ai-cat-btn"
+              class="touch-target inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-teal/40 bg-mint/50 text-tealDark text-xs font-semibold hover:bg-mint transition">
+              ${ICONS.ai}<span>AI Auto-Category &amp; Info</span>
+            </button>
+            <span id="s-ai-cat-note" class="text-xs text-tealDark font-medium hidden" aria-live="polite"></span>
+          </div>
 
           <div class="grid sm:grid-cols-3 gap-2">
             <div>
@@ -2535,9 +2611,70 @@ function renderSuggestionsTab() {
   const medSel = document.getElementById('s-medication');
   const existingWrap = document.getElementById('s-existing-wrap');
   const newNameWrap = document.getElementById('s-new-name-wrap');
+  const sNewNameInput = document.getElementById('s-name');
+  const sCatInput = document.getElementById('s-category');
+  const sCompInput = document.getElementById('s-company');
+  const sGenInput = document.getElementById('s-generic');
+  const sAiCatBtn = document.getElementById('s-ai-cat-btn');
+  const sAiCatNote = document.getElementById('s-ai-cat-note');
   const buyCostBanner = document.getElementById('s-buy-cost-banner');
   const belowAlert = document.getElementById('s-below-cost-alert');
   let activeBuyCost = null;
+  let sCatTouched = false;
+
+  sCatInput.addEventListener('input', () => {
+    const v = sCatInput.value.trim().toLowerCase();
+    sCatTouched = Boolean(v && v !== 'other');
+  });
+
+  async function runSuggestionAutoCategory(manual = false) {
+    const type = panel.querySelector('input[name="s-type"]:checked').value;
+    const medName = medSel.selectedOptions[0]?.dataset.name || '';
+    const name = type === 'new_med' ? sNewNameInput.value.trim() : medName;
+    if (!name) {
+      if (manual) {
+        showToast(
+          type === 'new_med' ? 'Type the new medicine name first.' : 'Pick an existing medicine first.',
+          'warn',
+        );
+      }
+      return;
+    }
+
+    const origHtml = sAiCatBtn.innerHTML;
+    sAiCatBtn.disabled = true;
+    sAiCatBtn.innerHTML = `${ICONS.ai}<span>Detecting…</span>`;
+    try {
+      const res = await autoCategorizeMedication({
+        supabase,
+        name,
+        existingCategories: categories,
+      });
+      if (!document.body.contains(sCatInput)) return;
+      sCatInput.value = res.category || 'Other';
+      sCatTouched = false;
+      if ((type === 'new_med' || !sCompInput.value.trim()) && res.company) {
+        sCompInput.value = res.company;
+      }
+      if ((type === 'new_med' || !sGenInput.value.trim()) && res.generic_name) {
+        sGenInput.value = res.generic_name;
+      }
+      const via = res.mode === 'gemini' ? `Gemini Cloud AI${res.model ? ` (${res.model})` : ''}` : 'Smart Classifier';
+      sAiCatNote.textContent = `${via}: ${res.category} — ${res.reason}`;
+      sAiCatNote.classList.remove('hidden');
+      if (manual) {
+        showToast(
+          `Detected category: ${res.category}${res.company ? ` (${res.company})` : ''}`,
+          res.category !== 'Other' ? 'success' : 'info',
+        );
+      }
+    } finally {
+      if (document.body.contains(sAiCatBtn)) {
+        sAiCatBtn.disabled = false;
+        sAiCatBtn.innerHTML = origHtml;
+      }
+    }
+  }
 
   function checkSuggestionCost() {
     if (!activeBuyCost) {
@@ -2560,13 +2697,15 @@ function renderSuggestionsTab() {
     const type = panel.querySelector('input[name="s-type"]:checked').value;
     existingWrap.classList.toggle('hidden', type === 'new_med');
     newNameWrap.classList.toggle('hidden', type !== 'new_med');
+    sCatTouched = false;
+    sAiCatNote.classList.add('hidden');
 
     const med = type === 'price_change' ? state.medications.find((m) => m.id === medSel.value) : null;
     if (med) {
       const meta = inferGenericAndCompany(med);
-      document.getElementById('s-category').value = med.category || '';
-      document.getElementById('s-company').value = meta.company || '';
-      document.getElementById('s-generic').value = meta.generic || '';
+      sCatInput.value = med.category || '';
+      sCompInput.value = meta.company || '';
+      sGenInput.value = meta.generic || '';
       UNIT_TYPES.forEach((u) => {
         const inp = document.getElementById(`s-${u}`);
         inp.placeholder = med['price_' + u] != null ? `Now ${med['price_' + u]}` : '₦';
@@ -2586,6 +2725,15 @@ function renderSuggestionsTab() {
     }
     checkSuggestionCost();
   }
+
+  sAiCatBtn.addEventListener('click', () => runSuggestionAutoCategory(true));
+  sNewNameInput.addEventListener('blur', () => {
+    const type = panel.querySelector('input[name="s-type"]:checked').value;
+    const cur = sCatInput.value.trim().toLowerCase();
+    if (type === 'new_med' && !sCatTouched && (!cur || cur === 'other')) {
+      runSuggestionAutoCategory(false);
+    }
+  });
 
   panel.querySelectorAll('input[name="s-type"]').forEach((r) => r.addEventListener('change', syncTypeAndMed));
   medSel.addEventListener('change', syncTypeAndMed);
@@ -2840,15 +2988,20 @@ function updateAdminResults() {
                     : `<p class="text-xs text-ink/70">No Purchase Book cost recorded yet</p>`
                 }
               </div>
-              <button type="button" class="save-med-btn touch-target bg-teal hover:bg-tealDark text-white text-sm font-semibold rounded-xl px-4 py-2" data-id="${esc(m.id)}">
-                Save Row
-              </button>
+              <div class="flex flex-wrap gap-2">
+                <button type="button" class="ai-cat-row-btn touch-target inline-flex items-center gap-1.5 border border-teal/40 bg-mint/50 hover:bg-mint text-tealDark text-xs font-semibold rounded-xl px-3 py-2" data-id="${esc(m.id)}">
+                  ${ICONS.ai}<span>AI Category</span>
+                </button>
+                <button type="button" class="save-med-btn touch-target bg-teal hover:bg-tealDark text-white text-sm font-semibold rounded-xl px-4 py-2" data-id="${esc(m.id)}">
+                  Save Row
+                </button>
+              </div>
             </div>
 
             <div class="grid sm:grid-cols-5 gap-2">
               <div>
                 <label class="block text-xs font-semibold mb-1">Category</label>
-                <input class="meta-input touch-target w-full border border-black/20 rounded-xl px-2.5 py-1.5 text-sm bg-white" data-field="category" value="${esc(m.category || 'Other')}" />
+                <input list="admin-cat-list" class="meta-input touch-target w-full border border-black/20 rounded-xl px-2.5 py-1.5 text-sm bg-white" data-field="category" value="${esc(m.category || 'Other')}" />
               </div>
               <div>
                 <label class="block text-xs font-semibold mb-1">Company</label>
@@ -2881,6 +3034,42 @@ function updateAdminResults() {
           </article>`;
       })
       .join('') || `<p class="text-sm text-ink/75 py-6 text-center">No medications match those filters.</p>`;
+
+  resultsEl.querySelectorAll('.ai-cat-row-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      const med = state.medications.find((x) => x.id === id);
+      if (!med) return;
+      const origHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = `${ICONS.ai}<span>Detecting…</span>`;
+      try {
+        const res = await autoCategorizeMedication({
+          supabase,
+          name: med.name,
+          existingCategories: getCanonicalCategoryList(state.medications),
+        });
+        const row = resultsEl.querySelector(`[data-row="${id}"]`);
+        if (!row) return;
+        const catInp = row.querySelector('[data-field="category"]');
+        const compInp = row.querySelector('[data-field="company"]');
+        const genInp = row.querySelector('[data-field="generic_name"]');
+        if (catInp && res.category) catInp.value = res.category;
+        if (compInp && !compInp.value.trim() && res.company) compInp.value = res.company;
+        if (genInp && !genInp.value.trim() && res.generic_name) genInp.value = res.generic_name;
+        const via = res.mode === 'gemini' ? 'Gemini AI' : 'Smart Classifier';
+        showToast(
+          `${med.name}: ${via} suggested "${res.category}" (${res.reason}). Click Save Row to apply.`,
+          res.category !== 'Other' ? 'success' : 'info',
+        );
+      } finally {
+        if (document.body.contains(btn)) {
+          btn.disabled = false;
+          btn.innerHTML = origHtml;
+        }
+      }
+    });
+  });
 
   resultsEl.querySelectorAll('.save-med-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -2979,22 +3168,192 @@ async function runAdminCleanup(triggerEl) {
   showToast(`Cleaned up ${updates.length} medication records!`, 'success');
 }
 
+async function openBatchCategorizeModal(triggerEl) {
+  const otherMeds = state.medications.filter(
+    (m) => String(m.category || '').trim().toLowerCase() === 'other',
+  );
+  if (otherMeds.length === 0) {
+    showToast('No medications currently labeled "Other"!', 'info');
+    return;
+  }
+
+  const canonicalCategories = getCanonicalCategoryList(state.medications);
+  openModal({
+    title: `AI Auto-Categorize "Other" (${otherMeds.length})`,
+    triggerEl,
+    bodyHtml: `
+      <div class="flex items-center gap-3 py-4 text-sm font-semibold text-tealDark" role="status">
+        <div class="typing-dots flex gap-1"><span></span><span></span><span></span></div>
+        <span>Analyzing ${otherMeds.length} medication(s) with Gemini AI &amp; Nigerian pharmacy knowledge…</span>
+      </div>
+    `,
+  });
+
+  const batch = await batchAutoCategorizeMedications({
+    supabase,
+    items: otherMeds,
+    existingCategories: canonicalCategories,
+  });
+
+  const body = document.getElementById('modal-body');
+  if (!body) return;
+
+  const medById = new Map(otherMeds.map((m) => [String(m.id), m]));
+
+  body.innerHTML = `
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="text-xs font-bold px-2.5 py-1 rounded-full ${
+          batch.mode === 'gemini' ? 'bg-indigo-100 text-indigo-900' : 'bg-mint text-tealDark'
+        }">
+          ${batch.mode === 'gemini' ? `Gemini Cloud AI${batch.model ? ` · ${esc(batch.model)}` : ''}` : 'Built-in Smart Classifier'}
+        </span>
+        <span class="text-xs text-ink/75">Review or adjust before applying. Prices stay 100% untouched.</span>
+      </div>
+      <div class="flex gap-1.5">
+        <button type="button" id="batch-select-all" class="touch-target px-3 py-1 rounded-lg border border-black/15 text-xs font-semibold hover:bg-black/5">Select All</button>
+        <button type="button" id="batch-clear-all" class="touch-target px-3 py-1 rounded-lg border border-black/15 text-xs font-semibold hover:bg-black/5">Clear</button>
+      </div>
+    </div>
+    ${batch.statusNote ? `<p class="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">${esc(batch.statusNote)}</p>` : ''}
+
+    <div class="space-y-2.5 max-h-[52vh] overflow-y-auto pr-1">
+      ${batch.results
+        .map((r) => {
+          const orig = medById.get(String(r.id));
+          const checked = r.category && r.category !== 'Other';
+          const addGen = !orig?.generic_name && r.generic_name;
+          const addComp = !orig?.company && r.company;
+          return `
+            <div class="batch-row rounded-xl border border-black/10 p-3 bg-porcelain/40 space-y-2" data-id="${esc(r.id)}">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <label class="inline-flex items-center gap-2 font-semibold text-sm cursor-pointer">
+                  <input type="checkbox" class="batch-cb w-4 h-4 accent-teal" ${checked ? 'checked' : ''} />
+                  <span>${esc(r.name)}</span>
+                </label>
+                <div class="flex items-center gap-1.5 text-xs">
+                  <span class="px-2 py-0.5 rounded-full bg-slate-200 text-slate-800">Other</span>
+                  <span aria-hidden="true">→</span>
+                  <input type="text" list="admin-cat-list" value="${esc(r.category)}"
+                    data-gen="${esc(addGen ? r.generic_name : '')}"
+                    data-comp="${esc(addComp ? r.company : '')}"
+                    class="batch-cat-inp touch-target border border-teal/40 rounded-lg px-2.5 py-1 text-xs font-semibold bg-white w-48"
+                    aria-label="Suggested category for ${esc(r.name)}" />
+                </div>
+              </div>
+              <div class="flex flex-wrap items-center gap-2 text-xs text-ink/75 pl-6">
+                ${addGen ? `<span class="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-900 font-semibold">+ Generic: ${esc(r.generic_name)}</span>` : ''}
+                ${addComp ? `<span class="px-2 py-0.5 rounded-full bg-mint text-tealDark font-semibold">+ Company: ${esc(r.company)}</span>` : ''}
+                <span>${esc(r.reason)}</span>
+              </div>
+            </div>`;
+        })
+        .join('')}
+    </div>
+
+    <div class="flex flex-wrap justify-end gap-2 pt-2 border-t border-black/10">
+      <button type="button" id="batch-cancel-btn" class="touch-target px-4 py-2 rounded-xl border border-black/20 text-sm font-medium hover:bg-black/5">Cancel</button>
+      <button type="button" id="batch-apply-btn" class="touch-target px-4 py-2 rounded-xl bg-gradient-to-r from-teal to-tealDark text-white text-sm font-semibold shadow-sm">
+        Apply Selected
+      </button>
+    </div>
+  `;
+
+  const applyBtn = body.querySelector('#batch-apply-btn');
+  const syncCount = () => {
+    const count = body.querySelectorAll('.batch-cb:checked').length;
+    applyBtn.textContent = `Apply Selected (${count})`;
+    applyBtn.disabled = count === 0;
+  };
+  syncCount();
+
+  body.querySelectorAll('.batch-cb').forEach((cb) => cb.addEventListener('change', syncCount));
+  body.querySelector('#batch-select-all').addEventListener('click', () => {
+    body.querySelectorAll('.batch-cb').forEach((cb) => {
+      cb.checked = true;
+    });
+    syncCount();
+  });
+  body.querySelector('#batch-clear-all').addEventListener('click', () => {
+    body.querySelectorAll('.batch-cb').forEach((cb) => {
+      cb.checked = false;
+    });
+    syncCount();
+  });
+  body.querySelector('#batch-cancel-btn').addEventListener('click', closeModal);
+
+  applyBtn.addEventListener('click', async () => {
+    const selectedRows = [...body.querySelectorAll('.batch-row')].filter(
+      (row) => row.querySelector('.batch-cb')?.checked,
+    );
+    if (selectedRows.length === 0) return;
+
+    applyBtn.disabled = true;
+    applyBtn.textContent = `Applying ${selectedRows.length}…`;
+
+    let updated = 0;
+    let failed = 0;
+
+    for (const row of selectedRows) {
+      const id = row.dataset.id;
+      const orig = medById.get(id);
+      const catInp = row.querySelector('.batch-cat-inp');
+      const newCat = catInp?.value.trim() || 'Other';
+      const addGen = catInp?.dataset.gen || '';
+      const addComp = catInp?.dataset.comp || '';
+
+      const patch = {};
+      if (newCat && newCat !== orig?.category) patch.category = newCat;
+      if (addGen && !orig?.generic_name) patch.generic_name = addGen;
+      if (addComp && !orig?.company) patch.company = addComp;
+
+      if (Object.keys(patch).length === 0) continue;
+
+      const { error } = await supabase.from('medications').update(patch).eq('id', id);
+      if (error) failed += 1;
+      else updated += 1;
+    }
+
+    await loadMedications();
+    closeModal();
+    refreshTabBar();
+    renderAdminTab();
+
+    if (failed > 0) {
+      showToast(`Updated ${updated} item(s), ${failed} could not be saved.`, 'warn');
+    } else {
+      showToast(`Updated ${updated} medication record(s)!`, 'success');
+    }
+  });
+}
+
 function renderAdminTab() {
   if (!isOwner()) return switchTab('sell');
   const panel = document.getElementById('tab-panel');
   const categories = ['All', ...new Set(state.medications.map((m) => m.category)).values()];
+  const canonicalCategories = getCanonicalCategoryList(state.medications);
   const companies = getAllCompaniesList();
+  const otherCount = state.medications.filter(
+    (m) => String(m.category || '').trim().toLowerCase() === 'other',
+  ).length;
 
   panel.innerHTML = `
     <section class="space-y-4" aria-labelledby="admin-heading">
+      <datalist id="admin-cat-list">${canonicalCategories.map((c) => `<option value="${esc(c)}">`).join('')}</datalist>
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 id="admin-heading" class="font-display text-xl font-bold text-tealDark">Full Price List (Owner Admin)</h2>
           <p class="text-xs text-ink/80">Edit retail prices, brands/companies, generic names, and stock counts directly.</p>
         </div>
-        <button type="button" id="admin-cleanup-btn" class="touch-target px-4 py-2 rounded-xl border border-teal text-tealDark bg-white text-xs font-semibold hover:bg-mint/40">
-          Clean Up Categories &amp; Spaces
-        </button>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" id="admin-ai-other-btn" ${otherCount === 0 ? 'disabled' : ''}
+            class="touch-target inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-teal to-tealDark text-white text-xs font-semibold shadow-sm hover:opacity-95 disabled:opacity-50">
+            ${ICONS.ai}<span>AI Categorize &ldquo;Other&rdquo; (${otherCount})</span>
+          </button>
+          <button type="button" id="admin-cleanup-btn" class="touch-target px-4 py-2 rounded-xl border border-teal text-tealDark bg-white text-xs font-semibold hover:bg-mint/40">
+            Clean Up Categories &amp; Spaces
+          </button>
+        </div>
       </div>
 
       <div class="card-surface bg-white border border-black/10 rounded-2xl p-4 grid sm:grid-cols-12 gap-3 items-end">
@@ -3041,6 +3400,7 @@ function renderAdminTab() {
     state.adminMissingOnly = e.target.checked;
     updateAdminResults();
   });
+  document.getElementById('admin-ai-other-btn').addEventListener('click', (e) => openBatchCategorizeModal(e.currentTarget));
   document.getElementById('admin-cleanup-btn').addEventListener('click', (e) => runAdminCleanup(e.currentTarget));
 
   updateAdminResults();

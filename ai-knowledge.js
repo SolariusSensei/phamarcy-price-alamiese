@@ -3,6 +3,31 @@ export const DISCLAIMER =
 
 export const UNIT_TYPES = ['packet', 'box', 'card', 'bottle', 'tube', 'counting'];
 
+export const STANDARD_CATEGORIES = [
+  'Pain Relief',
+  'Antibiotic',
+  'Antimalarial',
+  'Blood Pressure (BP)',
+  'Diabetes',
+  'Antacid / Digestive',
+  'Cough & Cold',
+  'Allergy',
+  'Vitamins & Tonics',
+  'Skin / Topical',
+  'Eye / Ear / Nose',
+  'Antiseptic / Wound Care',
+  'Pediatric',
+  'Hepatoprotectant',
+  "Women's Health",
+  'Anti-parasitics',
+  'Antifungals',
+  'Oral Rehydration / Electrolytes',
+  'Supplements',
+  'Other',
+];
+
+const MESSY_CATEGORY_ALIASES = new Set(['other', 'bp', 'typhoid', 'skin', 'infection']);
+
 const NON_COMPANY_PARENS = new Set([
   'big', 'small', 'medium', 'large', 'adult', 'adults', 'child', 'children', 'pediatric',
   'paediatric', 'infant', 'softgel', 'tablet', 'tablets', 'tab', 'tabs', 'capsule', 'capsules',
@@ -1815,4 +1840,357 @@ export function stripMarkdownForSpeech(rawText) {
     .replace(/[`*_]+/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// =========================================================
+// Auto-Category Helpers (Gemini Online + Offline Classifier)
+// =========================================================
+const REF_ID_TO_CATEGORY = {
+  paracetamol: 'Pain Relief',
+  ibuprofen: 'Pain Relief',
+  diclofenac: 'Pain Relief',
+  aspirin: 'Pain Relief',
+  amoxicillin: 'Antibiotic',
+  amox_clav: 'Antibiotic',
+  ampiclox: 'Antibiotic',
+  azithromycin: 'Antibiotic',
+  ciprofloxacin: 'Antibiotic',
+  erythromycin: 'Antibiotic',
+  metronidazole: 'Antibiotic',
+  cefuroxime: 'Antibiotic',
+  artemether_lumefantrine: 'Antimalarial',
+  amodiaquine: 'Antimalarial',
+  sp_malaria: 'Antimalarial',
+  amlodipine: 'Blood Pressure (BP)',
+  lisinopril: 'Blood Pressure (BP)',
+  nifedipine: 'Blood Pressure (BP)',
+  metformin: 'Diabetes',
+  omeprazole: 'Antacid / Digestive',
+  antacid: 'Antacid / Digestive',
+  loratadine_cetirizine: 'Allergy',
+  chlorpheniramine: 'Allergy',
+  cough_syrup: 'Cough & Cold',
+  salbutamol: 'Cough & Cold',
+  vitamin_c: 'Vitamins & Tonics',
+  b_complex: 'Vitamins & Tonics',
+  multivitamin: 'Vitamins & Tonics',
+  cyproheptadine_appetite: 'Vitamins & Tonics',
+  iron_tonic: 'Vitamins & Tonics',
+  cod_liver_oil: 'Vitamins & Tonics',
+  antifungal_cream: 'Skin / Topical',
+  triple_action_cream: 'Skin / Topical',
+  topical_balm: 'Skin / Topical',
+  ors: 'Oral Rehydration / Electrolytes',
+  albendazole: 'Anti-parasitics',
+  klovinal_vaginal: "Women's Health",
+};
+
+const OFFLINE_CATEGORY_RULES = [
+  {
+    category: 'Oral Rehydration / Electrolytes',
+    rx: /\b(?:oral drip|orbs|ors|rehydration|electrolyte)\b/i,
+    generic: 'Oral Rehydration Salts (ORS)',
+  },
+  {
+    category: 'Diabetes',
+    rx: /\b(?:glanil|glibenclamide|glimepiride|metformin|biophage|glucophage|insulin|gliclazide|diabet\w*)\b/i,
+  },
+  {
+    category: "Women's Health",
+    rx: /\b(?:klovinal|mifepak|postinor|misoprostol|mifepristone|pessary|vaginal|primolut|clomid|levonorgestrel|ergometrine)\b/i,
+  },
+  {
+    category: 'Pediatric',
+    rx: /\b(?:nospamin|gripe\s*water|infacol|teething|bonababe|pediatric|paediatric|infant\s*drop)\b/i,
+  },
+  {
+    category: 'Pain Relief',
+    rx: /\b(?:painkil|starcimol|suremol|klinfast\w*|ricam|sumo\b|piroxicam|meloxicam|tramadol|naproxen|aceclofenac|paracetamol|pcm|ibuprofen|diclofenac|aspirin|anacin|analgesic|pain)\b|\b\w*mol\b/i,
+  },
+  {
+    category: 'Supplements',
+    rx: /\b(?:complan|ensure|gluco[\s-]*joint|collagen|calcium|zinc|omega|protein|milk)\b/i,
+  },
+  {
+    category: 'Vitamins & Tonics',
+    rx: /\b(?:avroapetit|hapi[\s-]*vite|hemoforce\w*|blood\s*tonic|tonic|vite|vit\b|vitamin\w*|multivit\w*|fero\w*|iron|folic|appetit\w*|cyprivit|astymin|abidec|wellkid|wellman|wellwoman|becombion|zetup)\b/i,
+  },
+  {
+    category: 'Eye / Ear / Nose',
+    rx: /\b(?:eye\s*drop|ear\s*drop|nasal|otrivin|chloramphenicol\s*eye|gentamicin\s*eye|ophthalm\w*)\b/i,
+  },
+  {
+    category: 'Skin / Topical',
+    rx: /\b(?:abf\s*cream|cream|ointment|lotion|gel|balm|rub|derm\w*|skineal|funbact\w*|tribotan|nixoderm|epiderm|canesten|clotrimazole|topical)\b/i,
+  },
+  {
+    category: 'Antiseptic / Wound Care',
+    rx: /\b(?:dettol|savlon|spirit|iodine|hydrogen\s*peroxide|plaster|bandage|gauze|cotton\s*wool|antiseptic)\b/i,
+  },
+  {
+    category: 'Hepatoprotectant',
+    rx: /\b(?:livolin|essentiale|silymarin|liver|hepato\w*)\b/i,
+  },
+  {
+    category: 'Antifungals',
+    rx: /\b(?:fluconazole|ketoconazole\s*tab\w*|griseofulvin|terbinafine|itraconazole|nystatin|antifungal)\b/i,
+  },
+  {
+    category: 'Anti-parasitics',
+    rx: /\b(?:albendazole|mebendazole|zentel|ivermectin|praziquantel|pyrantel|worm\w*|deworm\w*)\b/i,
+  },
+  {
+    category: 'Antibiotic',
+    rx: /\b(?:amoxil|amox\w*|ampiclox|ampicillin|cloxacillin|augmentin|aquaclav|cipro\w*|azithro\w*|erythro\w*|erymed|cef\w*|ceph\w*|zinnat|doxy\w*|tetracycline|septrin|co-?trimoxazole|flagyl|metronidazole|tinidazole|levofloxacin|ofloxacin)\b|\w*(?:cillin|mycin|floxacin)\b/i,
+  },
+  {
+    category: 'Antimalarial',
+    rx: /\b(?:artem\w*|lumefantrine|amodiaquine|amatem\w*|lonart\w*|coartem|fansidar|amalar|maloxine|chloroquine|quinine|camoquin|larimal|malaria)\b/i,
+  },
+  {
+    category: 'Blood Pressure (BP)',
+    rx: /\b(?:amlodipine|nifedipine|lisinopril|losartan|valsartan|atenolol|propranolol|methyldopa|moduretic|hydrochlorothiazide|furosemide|lasix|norvasc|bp)\b|\w*(?:dipine|sartan|pril|olol)\b/i,
+  },
+  {
+    category: 'Antacid / Digestive',
+    rx: /\b(?:omeprazole|rabeprazole|pantoprazole|esomeprazole|cimetidine|famotidine|ranitidine|antacid|mist\s*mag|gaviscon|gestid|avrocid|gecrol|acipep|buscopan|loperamide|imodium|dulcolax|bisacodyl|lactulose|ulcer|gastr\w*)\b/i,
+  },
+  {
+    category: 'Cough & Cold',
+    rx: /\b(?:cough|cold|catarrh|benylin|emzolyn|tuxil\w*|cofmix|lozenge\w*|strepsil\w*|salbutamol|ventolin|inhaler|expectorant|mucus|decongest\w*)\b/i,
+  },
+  {
+    category: 'Allergy',
+    rx: /\b(?:loratadine|cetirizine|piriton|chlorpheniramine|fexofenadine|desloratadine|promethazine|clarityn|zyrtec|allergy)\b/i,
+  },
+];
+
+export function getCanonicalCategoryList(meds = []) {
+  const seen = new Set();
+  const ordered = [];
+
+  for (const cat of STANDARD_CATEGORIES.filter(c => c !== 'Other')) {
+    seen.add(cat.toLowerCase());
+    ordered.push(cat);
+  }
+
+  for (const m of meds || []) {
+    const raw = String(m?.category ?? '').trim();
+    if (!raw) continue;
+    const low = raw.toLowerCase();
+    if (MESSY_CATEGORY_ALIASES.has(low)) continue;
+    if (!seen.has(low)) {
+      seen.add(low);
+      ordered.push(raw);
+    }
+  }
+
+  ordered.push('Other');
+  return ordered;
+}
+
+export function guessCategoryOffline(medName, existingMed = null) {
+  const name = String(medName ?? existingMed?.name ?? '').trim();
+  const baseMed = { ...(existingMed || {}), name };
+  const meta = inferGenericAndCompany(baseMed);
+  const company = meta.company || '';
+
+  if (!name) {
+    return {
+      category: 'Other',
+      generic_name: meta.generic || '',
+      company,
+      confidence: 'low',
+      reason: 'Enter a medication name first.',
+      mode: 'local',
+    };
+  }
+
+  // Oral antifungals explicitly marked as tab/cap take priority over topical cream ref
+  if (/\b(?:fluconazole|ketoconazole\s+tab\w*|griseofulvin|terbinafine|itraconazole)\b/i.test(name)) {
+    return {
+      category: 'Antifungals',
+      generic_name: meta.generic || '',
+      company,
+      confidence: 'high',
+      reason: 'Matched oral antifungal pattern',
+      mode: 'local',
+    };
+  }
+
+  const ref = meta.ref || matchDrugReference(baseMed);
+  if (ref && REF_ID_TO_CATEGORY[ref.id]) {
+    return {
+      category: REF_ID_TO_CATEGORY[ref.id],
+      generic_name: meta.generic || ref.generic || '',
+      company,
+      confidence: 'high',
+      reason: `Matched drug reference (${ref.generic})`,
+      mode: 'local',
+    };
+  }
+
+  for (const rule of OFFLINE_CATEGORY_RULES) {
+    if (rule.rx.test(name)) {
+      return {
+        category: rule.category,
+        generic_name: meta.generic || rule.generic || '',
+        company,
+        confidence: 'medium',
+        reason: `Matched pharmacy brand/keyword rule (${rule.category})`,
+        mode: 'local',
+      };
+    }
+  }
+
+  return {
+    category: 'Other',
+    generic_name: meta.generic || '',
+    company,
+    confidence: 'low',
+    reason: 'No exact offline match — use AI Auto-Category online or select manually',
+    mode: 'local',
+  };
+}
+
+export async function autoCategorizeMedication({
+  supabase,
+  name,
+  existingCategories = [],
+}) {
+  const cleanName = String(name ?? '').trim();
+  const local = guessCategoryOffline(cleanName);
+
+  if (!cleanName || !supabase?.functions?.invoke) {
+    return { ...local, mode: 'local' };
+  }
+
+  const allowed = existingCategories.length ? existingCategories : STANDARD_CATEGORIES;
+
+  try {
+    const { data, error } = await supabase.functions.invoke('pharmacy-ai', {
+      body: {
+        action: 'categorize',
+        medicationName: cleanName,
+        existingCategories: allowed,
+      },
+    });
+
+    if (!error && data?.configured === true && data?.mode === 'gemini' && data?.result?.category) {
+      const r = data.result;
+      const finalCategory = r.category === 'Other' && local.category !== 'Other'
+        ? local.category
+        : r.category;
+      return {
+        category: finalCategory,
+        generic_name: r.generic_name || local.generic_name || '',
+        company: r.company || local.company || '',
+        confidence: r.confidence || 'high',
+        reason: r.reason || `Classified by Gemini Cloud AI (${finalCategory})`,
+        mode: 'gemini',
+        model: data.model || null,
+      };
+    }
+
+    return {
+      ...local,
+      mode: 'local',
+      statusNote: data?.message || '',
+    };
+  } catch {
+    return { ...local, mode: 'local' };
+  }
+}
+
+export async function batchAutoCategorizeMedications({
+  supabase,
+  items = [],
+  existingCategories = [],
+}) {
+  const cleanItems = (items || []).filter(it => it && String(it.name ?? '').trim().length > 0);
+  if (cleanItems.length === 0) {
+    return { mode: 'local', model: null, statusNote: '', results: [] };
+  }
+
+  const allowed = existingCategories.length ? existingCategories : STANDARD_CATEGORIES;
+  const CHUNK_SIZE = 30;
+  const geminiById = new Map();
+  let anyGemini = false;
+  let lastModel = null;
+  let statusNote = '';
+
+  if (supabase?.functions?.invoke) {
+    for (let i = 0; i < cleanItems.length; i += CHUNK_SIZE) {
+      const chunk = cleanItems.slice(i, i + CHUNK_SIZE).map(it => ({
+        id: String(it.id),
+        name: String(it.name).trim(),
+        company: it.company ? String(it.company).trim() : '',
+        generic_name: it.generic_name ? String(it.generic_name).trim() : '',
+      }));
+
+      try {
+        const { data, error } = await supabase.functions.invoke('pharmacy-ai', {
+          body: {
+            action: 'batch_categorize',
+            items: chunk,
+            existingCategories: allowed,
+          },
+        });
+
+        if (!error && data?.configured === true && data?.mode === 'gemini' && Array.isArray(data?.results)) {
+          anyGemini = true;
+          if (data.model) lastModel = data.model;
+          for (const entry of data.results) {
+            if (entry && entry.id != null) {
+              geminiById.set(String(entry.id), entry);
+            }
+          }
+        } else if (data?.message) {
+          statusNote = data.message;
+        }
+      } catch {
+        // Fall back to local classifier per item
+      }
+    }
+  }
+
+  const results = cleanItems.map(it => {
+    const idStr = String(it.id);
+    const local = guessCategoryOffline(it.name, it);
+    const online = geminiById.get(idStr);
+
+    if (online && online.category) {
+      const resolvedCategory = online.category === 'Other' && local.category !== 'Other'
+        ? local.category
+        : online.category;
+      return {
+        id: it.id,
+        name: it.name,
+        category: resolvedCategory,
+        generic_name: online.generic_name || local.generic_name || '',
+        company: online.company || local.company || '',
+        confidence: online.confidence || 'high',
+        reason: online.reason || `Classified by Gemini Cloud AI (${resolvedCategory})`,
+        mode: 'gemini',
+      };
+    }
+
+    return {
+      id: it.id,
+      name: it.name,
+      category: local.category,
+      generic_name: local.generic_name,
+      company: local.company,
+      confidence: local.confidence,
+      reason: local.reason,
+      mode: 'local',
+    };
+  });
+
+  return {
+    mode: anyGemini ? 'gemini' : 'local',
+    model: lastModel,
+    statusNote,
+    results,
+  };
 }
