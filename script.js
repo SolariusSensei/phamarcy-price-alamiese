@@ -13,6 +13,8 @@ import {
   getAllAvailablePrices,
   analyzeInventoryVelocity,
   askPharmacyAI,
+  formatAiMarkdownHtml,
+  stripMarkdownForSpeech,
 } from './ai-knowledge.js';
 
 // =========================================================
@@ -2062,7 +2064,7 @@ function renderAiOutput() {
           (s) => `
           <div class="rounded-lg bg-black/[0.03] border border-black/10 p-3 space-y-1">
             <h4 class="text-xs font-bold uppercase tracking-wide text-tealDark">${esc(s.heading)}</h4>
-            <p class="text-sm whitespace-pre-line leading-relaxed">${esc(s.body)}</p>
+            <div class="ai-formatted space-y-1.5 text-sm leading-relaxed">${formatAiMarkdownHtml(s.body)}</div>
           </div>`,
         )
         .join('');
@@ -2094,7 +2096,7 @@ function renderAiOutput() {
             </div>
           </div>
 
-          <div class="text-sm whitespace-pre-line leading-relaxed">${esc(r.answer)}</div>
+          <div class="ai-formatted space-y-2 text-sm leading-relaxed">${formatAiMarkdownHtml(r.answer)}</div>
           ${sectionsHtml ? `<div class="space-y-2">${sectionsHtml}</div>` : ''}
           ${actionsHtml ? `<div class="flex flex-wrap gap-2 pt-1">${actionsHtml}</div>` : ''}
           ${r.statusNote ? `<p class="text-xs text-ink/70">${esc(r.statusNote)}</p>` : ''}
@@ -2105,7 +2107,7 @@ function renderAiOutput() {
   out.querySelectorAll('.ai-speak-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       const r = state.aiResults[Number(btn.dataset.r)];
-      if (r) speakText(`${r.title}. ${r.answer}`);
+      if (r) speakText(stripMarkdownForSpeech(`${r.title}. ${r.answer}`));
     });
   });
 

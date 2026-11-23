@@ -1557,3 +1557,84 @@ export async function askPharmacyAI({
     };
   }
 }
+
+function formatInlineMarkdown(escapedLine) {
+  return escapedLine
+    .replace(/`([^`]+)`/g, '<code class="font-mono text-xs bg-black/5 px-1 py-0.5 rounded">$1</code>')
+    .replace(/\*\*([^*]+?)\*\*/g, '<strong class="font-semibold">$1</strong>')
+    .replace(/__([^_]+?)__/g, '<strong class="font-semibold">$1</strong>')
+    .replace(/(^|[\s(>])\*([^*\s][^*]*?)\*(?=[\s.,;:!?)]|$)/g, '$1<em>$2</em>')
+    .replace(/\*/g, '');
+}
+
+export function formatAiMarkdownHtml(rawText) {
+  const safeLines = esc(String(rawText ?? '').replace(/\r\n?/g, '\n')).split('\n');
+  const out = [];
+  let openList = null;
+
+  const closeList = () => {
+    if (openList === 'ul') out.push('</ul>');
+    else if (openList === 'ol') out.push('</ol>');
+    openList = null;
+  };
+
+  for (const line of safeLines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+
+    if (/^(?:[-*_]\s*){3,}$/.test(trimmed)) {
+      closeList();
+      out.push('<hr class="border-black/10 my-2" />');
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^#{1,6}\s+(.+)$/);
+    if (headingMatch) {
+      closeList();
+      out.push(`<h4 class="font-semibold text-sm text-tealDark pt-1">${formatInlineMarkdown(headingMatch[1].trim())}</h4>`);
+      continue;
+    }
+
+    const ulMatch = line.match(/^\s*(?:[*+\-•])\s+(.+)$/);
+    if (ulMatch) {
+      if (openList !== 'ul') {
+        closeList();
+        openList = 'ul';
+        out.push('<ul class="list-disc pl-5 space-y-1">');
+      }
+      out.push(`<li>${formatInlineMarkdown(ulMatch[1].trim())}</li>`);
+      continue;
+    }
+
+    const olMatch = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (olMatch) {
+      if (openList !== 'ol') {
+        closeList();
+        openList = 'ol';
+        out.push('<ol class="list-decimal pl-5 space-y-1">');
+      }
+      out.push(`<li>${formatInlineMarkdown(olMatch[1].trim())}</li>`);
+      continue;
+    }
+
+    closeList();
+    out.push(`<p class="leading-relaxed">${formatInlineMarkdown(trimmed)}</p>`);
+  }
+
+  closeList();
+  return out.join('');
+}
+
+export function stripMarkdownForSpeech(rawText) {
+  return String(rawText ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/^\s*#{1,6}\s+/gm, '')
+    .replace(/^\s*(?:[*+\-•]|\d+[.)])\s+/gm, '')
+    .replace(/^\s*(?:[-*_]\s*){3,}$/gm, ' ')
+    .replace(/[`*_]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
