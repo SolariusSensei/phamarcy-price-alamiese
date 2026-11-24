@@ -19,6 +19,9 @@ import {
   getCanonicalCategoryList,
   autoCategorizeMedication,
   batchAutoCategorizeMedications,
+  normalizeMedicationNameKey,
+  findDuplicateMedication,
+  findPotentialDuplicateGroups,
 } from './ai-knowledge.js';
 
 // =========================================================
@@ -320,7 +323,11 @@ async function loadProfile() {
 }
 
 async function loadMedications() {
-  const { data, error } = await supabase.from('medications').select('*').order('name');
+  const { data, error } = await supabase
+    .from('medications')
+    .select('*')
+    .eq('is_active', true)
+    .order('name');
   if (error) showToast('Could not load medications: ' + error.message, 'error');
   else state.medications = data || [];
 }
@@ -1066,13 +1073,33 @@ function renderReceiptView() {
 // ---------------------------------------------------------
 // TAB 1: SELL (Zero Focus Loss, POS Price Tiles, Cost Privacy)
 // ---------------------------------------------------------
+function getUniqueCategoriesFilterList(meds = []) {
+  const byKey = new Map();
+  meds.forEach((m) => {
+    const raw = String(m?.category || '').trim();
+    if (!raw) return;
+    const key = raw.toLowerCase();
+    const cur = byKey.get(key);
+    if (!cur || (/^[A-Z]/.test(raw) && !/^[A-Z]/.test(cur))) {
+      byKey.set(key, raw);
+    }
+  });
+  return ['All', ...[...byKey.values()].sort((a, b) => a.localeCompare(b))];
+}
+
 function getAllCompaniesList() {
-  const set = new Set();
+  const byKey = new Map();
   state.medications.forEach((m) => {
     const meta = inferGenericAndCompany(m);
-    if (meta.company) set.add(meta.company);
+    const raw = String(meta.company || '').trim();
+    if (!raw) return;
+    const key = raw.toLowerCase();
+    const cur = byKey.get(key);
+    if (!cur || (/^[A-Z]/.test(raw) && !/^[A-Z]/.test(cur))) {
+      byKey.set(key, raw);
+    }
   });
-  return ['All', ...[...set].sort((a, b) => a.localeCompare(b))];
+  return ['All', ...[...byKey.values()].sort((a, b) => a.localeCompare(b))];
 }
 
 function updateSellResults() {
@@ -1090,11 +1117,14 @@ function updateSellResults() {
     }
   });
 
+  const sellCatKey = state.sellCategory.trim().toLowerCase();
+  const sellCompKey = state.sellCompany.trim().toLowerCase();
+
   const scored = state.medications
     .map((m) => {
       const meta = inferGenericAndCompany(m);
-      if (state.sellCategory !== 'All' && m.category !== state.sellCategory) return null;
-      if (state.sellCompany !== 'All' && meta.company !== state.sellCompany) return null;
+      if (state.sellCategory !== 'All' && String(m.category || '').trim().toLowerCase() !== sellCatKey) return null;
+      if (state.sellCompany !== 'All' && String(meta.company || '').trim().toLowerCase() !== sellCompKey) return null;
       const score = q ? fuzzyScore(q, m) : 1;
       if (q && score < 55) return null;
       return { med: m, meta, score };
@@ -1275,7 +1305,7 @@ function updateSellResults() {
 }
 
 function renderSellTab() {
-  const categories = ['All', ...new Set(state.medications.map((m) => m.category)).values()];
+  const categories = getUniqueCategoriesFilterList(state.medications);
   const companies = getAllCompaniesList();
   const panel = document.getElementById('tab-panel');
 
@@ -1539,6 +1569,7 @@ function renderPurchaseBookTab() {
               </button>
               <span id="pb-ai-cat-note" class="text-xs text-tealDark font-medium hidden" aria-live="polite"></span>
             </div>
+            <div id="pb-dup-banner" class="hidden sm:col-span-2 rounded-xl bg-amber-50 border border-amber-300 px-3 py-2 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2" role="status"></div>
           </div>
 
           <div class="grid sm:grid-cols-2 gap-2">
@@ -1657,6 +1688,7 @@ function renderPurchaseBookTab() {
   const pbNewCatInput = document.getElementById('pb-new-cat');
   const pbAiCatBtn = document.getElementById('pb-ai-cat-btn');
   const pbAiCatNote = document.getElementById('pb-ai-cat-note');
+  const pbDupBanner = document.getElementById('pb-dup-banner');
   const compInput = document.getElementById('pb-company');
   const genInput = document.getElementById('pb-generic');
   const qtyInput = document.getElementById('pb-qty');
@@ -1713,6 +1745,27 @@ function renderPurchaseBookTab() {
   }
 
   pbAiCatBtn.addEventListener('click', () => runPbAutoCategory(true));
+  pbNewNameInput.addEventListener('input', () => {
+    const dup = !medSelect.value ? findDuplicateMedication(pbNewNameInput.value, state.medications) : null;
+    if (dup) {
+      pbDupBanner.innerHTML = `
+        <span>Already on shelf as <strong>${esc(dup.name)}</strong> (${esc(dup.category || 'Other')}). Avoid duplicate entries!</span>
+        <button type="button" id="pb-use-dup-btn" class="touch-target px-3 py-1 rounded-lg bg-amber-700 hover:bg-amber-800 text-white font-semibold">
+          Use Existing (${esc(dup.name)})
+        </button>
+      `;
+      pbDupBanner.classList.remove('hidden');
+      pbDupBanner.querySelector('#pb-use-dup-btn')?.addEventListener('click', () => {
+        medSelect.value = dup.id;
+        pbNewNameInput.value = '';
+        pbDupBanner.classList.add('hidden');
+        syncMedSelection();
+        showToast(`Switched to existing shelf item "${dup.name}".`, 'info');
+      });
+    } else {
+      pbDupBanner.classList.add('hidden');
+    }
+  });
   pbNewNameInput.addEventListener('blur', () => {
     const cur = pbNewCatInput.value.trim().toLowerCase();
     if (!medSelect.value && !pbCatTouched && (!cur || cur === 'other')) {
@@ -1725,6 +1778,7 @@ function renderPurchaseBookTab() {
     const isNew = !medSelect.value;
     newMedFields.classList.toggle('hidden', !isNew);
     if (!isNew) {
+      pbDupBanner.classList.add('hidden');
       const m = state.medications.find((x) => x.id === medSelect.value);
       if (m) {
         const meta = inferGenericAndCompany(m);
@@ -1826,11 +1880,19 @@ function renderPurchaseBookTab() {
     e.preventDefault();
     const submitBtn = document.getElementById('pb-submit-btn');
     let medId = medSelect.value || null;
-    const medName = medId ? medSelect.selectedOptions[0].textContent : document.getElementById('pb-new-name').value.trim();
+    let medName = medId ? medSelect.selectedOptions[0].textContent : document.getElementById('pb-new-name').value.trim();
 
     if (!medName) {
       showToast('Pick an existing medicine or type a new medicine name.', 'warn');
       return;
+    }
+
+    if (!medId) {
+      const dup = findDuplicateMedication(medName, state.medications);
+      if (dup) {
+        medId = dup.id;
+        medName = dup.name;
+      }
     }
 
     const company = compInput.value.trim() || null;
@@ -2511,6 +2573,8 @@ function renderSuggestionsTab() {
             <input id="s-name" type="text" placeholder="Medicine name" class="touch-target w-full border border-black/20 rounded-xl px-3 py-2 bg-white" />
           </div>
 
+          <div id="s-dup-banner" class="hidden rounded-xl bg-amber-50 border border-amber-300 px-3 py-2 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2" role="status"></div>
+
           <div id="s-buy-cost-banner" class="hidden rounded-xl bg-mint/50 border border-teal/25 px-3 py-2 text-xs"></div>
 
           <div class="flex flex-wrap items-center justify-between gap-2">
@@ -2617,6 +2681,7 @@ function renderSuggestionsTab() {
   const sGenInput = document.getElementById('s-generic');
   const sAiCatBtn = document.getElementById('s-ai-cat-btn');
   const sAiCatNote = document.getElementById('s-ai-cat-note');
+  const sDupBanner = document.getElementById('s-dup-banner');
   const buyCostBanner = document.getElementById('s-buy-cost-banner');
   const belowAlert = document.getElementById('s-below-cost-alert');
   let activeBuyCost = null;
@@ -2699,6 +2764,7 @@ function renderSuggestionsTab() {
     newNameWrap.classList.toggle('hidden', type !== 'new_med');
     sCatTouched = false;
     sAiCatNote.classList.add('hidden');
+    if (type !== 'new_med') sDupBanner.classList.add('hidden');
 
     const med = type === 'price_change' ? state.medications.find((m) => m.id === medSel.value) : null;
     if (med) {
@@ -2727,6 +2793,30 @@ function renderSuggestionsTab() {
   }
 
   sAiCatBtn.addEventListener('click', () => runSuggestionAutoCategory(true));
+  sNewNameInput.addEventListener('input', () => {
+    const type = panel.querySelector('input[name="s-type"]:checked').value;
+    const dup = type === 'new_med' ? findDuplicateMedication(sNewNameInput.value, state.medications) : null;
+    if (dup) {
+      sDupBanner.innerHTML = `
+        <span><strong>${esc(dup.name)}</strong> is already on your shelf (${esc(dup.category || 'Other')}). Submit as a Price Change instead!</span>
+        <button type="button" id="s-switch-dup-btn" class="touch-target px-3 py-1 rounded-lg bg-amber-700 hover:bg-amber-800 text-white font-semibold">
+          Switch to Price Change (${esc(dup.name)})
+        </button>
+      `;
+      sDupBanner.classList.remove('hidden');
+      sDupBanner.querySelector('#s-switch-dup-btn')?.addEventListener('click', () => {
+        const pcRadio = panel.querySelector('input[name="s-type"][value="price_change"]');
+        if (pcRadio) pcRadio.checked = true;
+        medSel.value = dup.id;
+        sNewNameInput.value = '';
+        sDupBanner.classList.add('hidden');
+        syncTypeAndMed();
+        showToast(`Switched to Price Change for "${dup.name}".`, 'info');
+      });
+    } else {
+      sDupBanner.classList.add('hidden');
+    }
+  });
   sNewNameInput.addEventListener('blur', () => {
     const type = panel.querySelector('input[name="s-type"]:checked').value;
     const cur = sCatInput.value.trim().toLowerCase();
@@ -2769,6 +2859,14 @@ function renderSuggestionsTab() {
     if (!name) {
       showToast('Please enter the new medicine name.', 'warn');
       return;
+    }
+
+    if (type === 'new_med') {
+      const dup = findDuplicateMedication(name, state.medications);
+      if (dup) {
+        showToast(`"${dup.name}" already exists on the shelf — switch to Price Change instead of adding a duplicate.`, 'warn');
+        return;
+      }
     }
 
     const noPriceEntered = UNIT_TYPES.every((u) => document.getElementById(`s-${u}`).value === '');
@@ -2960,10 +3058,12 @@ function updateAdminResults() {
   if (!resultsEl) return;
 
   const q = state.adminSearch.trim();
+  const adminCatKey = state.adminCategory.trim().toLowerCase();
+  const adminCompKey = state.adminCompany.trim().toLowerCase();
   const list = state.medications.filter((m) => {
     const meta = inferGenericAndCompany(m);
-    if (state.adminCategory !== 'All' && m.category !== state.adminCategory) return false;
-    if (state.adminCompany !== 'All' && meta.company !== state.adminCompany) return false;
+    if (state.adminCategory !== 'All' && String(m.category || '').trim().toLowerCase() !== adminCatKey) return false;
+    if (state.adminCompany !== 'All' && String(meta.company || '').trim().toLowerCase() !== adminCompKey) return false;
     if (state.adminMissingOnly && getAllAvailablePrices(m).length > 0) return false;
     if (q && fuzzyScore(q, m) < 55) return false;
     return true;
@@ -3327,15 +3427,109 @@ async function openBatchCategorizeModal(triggerEl) {
   });
 }
 
+async function openMergeDuplicatesModal(triggerEl) {
+  const renderGroupsInModal = () => {
+    const groups = findPotentialDuplicateGroups(state.medications);
+    if (groups.length === 0) {
+      closeModal();
+      showToast('No duplicate or near-duplicate medications found!', 'info');
+      return;
+    }
+
+    const groupsHtml = groups
+      .map((g, gIdx) => {
+        const rowsHtml = g.items
+          .map((item, iIdx) => {
+            const meta = inferGenericAndCompany(item);
+            const prices = getAllAvailablePrices(item)
+              .map((p) => `${p.qtyType}: ${money(p.unitPrice)}`)
+              .join(' · ') || 'No prices set';
+            return `
+              <label class="flex items-start gap-2.5 p-2.5 rounded-xl border border-black/10 bg-white cursor-pointer hover:bg-mint/20">
+                <input type="radio" name="merge-keep-${gIdx}" value="${esc(item.id)}" ${iIdx === 0 ? 'checked' : ''} class="mt-1 w-4 h-4 accent-teal" />
+                <div class="flex-1 min-w-0 text-xs space-y-0.5">
+                  <div class="flex flex-wrap items-center gap-1.5">
+                    <span class="font-bold text-sm text-ink">${esc(item.name)}</span>
+                    <span class="px-2 py-0.5 rounded-full bg-porcelain border border-black/10 font-semibold">${esc(item.category || 'Other')}</span>
+                    ${meta.company ? `<span class="px-2 py-0.5 rounded-full bg-mint text-tealDark font-semibold">${esc(meta.company)}</span>` : ''}
+                    ${meta.generic ? `<span class="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-900 font-semibold">${esc(meta.generic)}</span>` : ''}
+                  </div>
+                  <p class="text-ink/80">${esc(prices)}</p>
+                </div>
+              </label>`;
+          })
+          .join('');
+
+        return `
+          <div class="dup-group rounded-2xl border border-black/10 bg-porcelain/50 p-3.5 space-y-2.5" data-g="${gIdx}">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <p class="text-xs font-bold uppercase tracking-wide text-tealDark">${esc(g.reason)}</p>
+              <button type="button" class="merge-group-btn touch-target px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-teal to-tealDark text-white text-xs font-semibold shadow-sm" data-g="${gIdx}">
+                Merge &amp; Keep Selected
+              </button>
+            </div>
+            <p class="text-xs text-ink/75">Select which name to keep — all missing unit prices, stock counts, and sales history will merge automatically:</p>
+            <div class="space-y-2">${rowsHtml}</div>
+          </div>`;
+      })
+      .join('');
+
+    openModal({
+      title: `Merge Duplicate Medications (${groups.length})`,
+      triggerEl,
+      bodyHtml: `<div class="space-y-4">${groupsHtml}</div>`,
+      onMount: (body) => {
+        body.querySelectorAll('.merge-group-btn').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const gIdx = Number(btn.dataset.g);
+            const group = groups[gIdx];
+            if (!group) return;
+            const keepInp = body.querySelector(`input[name="merge-keep-${gIdx}"]:checked`);
+            const keepId = keepInp?.value;
+            if (!keepId) return;
+
+            const dropIds = group.items.map((x) => String(x.id)).filter((id) => id !== String(keepId));
+            if (dropIds.length === 0) return;
+
+            btn.disabled = true;
+            btn.textContent = 'Merging…';
+            try {
+              for (const dropId of dropIds) {
+                const { error } = await supabase.rpc('merge_duplicate_medications', {
+                  p_keep_id: keepId,
+                  p_drop_id: dropId,
+                });
+                if (error) throw error;
+              }
+              await loadMedications();
+              refreshTabBar();
+              renderAdminTab();
+              showToast('Merged duplicates safely — all prices and history preserved!', 'success');
+              renderGroupsInModal();
+            } catch (err) {
+              showToast('Could not merge duplicates: ' + err.message, 'error');
+              btn.disabled = false;
+              btn.textContent = 'Merge & Keep Selected';
+            }
+          });
+        });
+      },
+    });
+  };
+
+  renderGroupsInModal();
+}
+
 function renderAdminTab() {
   if (!isOwner()) return switchTab('sell');
   const panel = document.getElementById('tab-panel');
-  const categories = ['All', ...new Set(state.medications.map((m) => m.category)).values()];
+  const categories = getUniqueCategoriesFilterList(state.medications);
   const canonicalCategories = getCanonicalCategoryList(state.medications);
   const companies = getAllCompaniesList();
   const otherCount = state.medications.filter(
     (m) => String(m.category || '').trim().toLowerCase() === 'other',
   ).length;
+  const dupGroups = findPotentialDuplicateGroups(state.medications);
 
   panel.innerHTML = `
     <section class="space-y-4" aria-labelledby="admin-heading">
@@ -3346,6 +3540,10 @@ function renderAdminTab() {
           <p class="text-xs text-ink/80">Edit retail prices, brands/companies, generic names, and stock counts directly.</p>
         </div>
         <div class="flex flex-wrap gap-2">
+          <button type="button" id="admin-dup-btn" ${dupGroups.length === 0 ? 'disabled' : ''}
+            class="touch-target inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-amber-500 bg-amber-50 text-amber-950 text-xs font-semibold hover:bg-amber-100 disabled:opacity-50">
+            Merge Duplicates (${dupGroups.length})
+          </button>
           <button type="button" id="admin-ai-other-btn" ${otherCount === 0 ? 'disabled' : ''}
             class="touch-target inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-teal to-tealDark text-white text-xs font-semibold shadow-sm hover:opacity-95 disabled:opacity-50">
             ${ICONS.ai}<span>AI Categorize &ldquo;Other&rdquo; (${otherCount})</span>
@@ -3400,6 +3598,7 @@ function renderAdminTab() {
     state.adminMissingOnly = e.target.checked;
     updateAdminResults();
   });
+  document.getElementById('admin-dup-btn').addEventListener('click', (e) => openMergeDuplicatesModal(e.currentTarget));
   document.getElementById('admin-ai-other-btn').addEventListener('click', (e) => openBatchCategorizeModal(e.currentTarget));
   document.getElementById('admin-cleanup-btn').addEventListener('click', (e) => runAdminCleanup(e.currentTarget));
 

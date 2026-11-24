@@ -2194,3 +2194,129 @@ export async function batchAutoCategorizeMedications({
     results,
   };
 }
+
+// =========================================================
+// Duplicate Medication Detection & Safe Merge Helpers
+// =========================================================
+const VARIANT_MODIFIER_RX =
+  /\b(?:big|small|medium|large|adult|adults|child|children|pediatric|paediatric|infant|syrup|suspension|tablet|tablets|tab|tabs|capsule|capsules|cap|caps|cream|gel|ointment|injection|inj|drops|pessary|forte|extra|plus|dm|counting|\d+\s*(?:mg|mcg|ml|g)|by\s*\d+|x\s*\d+)\b/gi;
+
+export function normalizeMedicationNameKey(name) {
+  return String(name ?? '')
+    .trim()
+    .replace(/\s*-\s*/g, '-')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+export function findDuplicateMedication(name, meds = [], excludeId = null) {
+  const key = normalizeMedicationNameKey(name);
+  if (!key) return null;
+  const alpha = key.replace(/[^a-z0-9]/g, '');
+
+  for (const m of meds || []) {
+    if (!m || (excludeId != null && String(m.id) === String(excludeId))) continue;
+    const mk = normalizeMedicationNameKey(m.name);
+    if (mk === key) return m;
+    if (alpha.length >= 4 && mk.replace(/[^a-z0-9]/g, '') === alpha) return m;
+  }
+  return null;
+}
+
+function sortDuplicateGroupItems(items) {
+  return [...items].sort((a, b) => {
+    const aCap = /^[A-Z]/.test(String(a.name || '').trim()) ? 1 : 0;
+    const bCap = /^[A-Z]/.test(String(b.name || '').trim()) ? 1 : 0;
+    if (bCap !== aCap) return bCap - aCap;
+
+    const aCleanHyphen = /\s+-\s*|\s*-\s+/.test(String(a.name || '')) ? 0 : 1;
+    const bCleanHyphen = /\s+-\s*|\s*-\s+/.test(String(b.name || '')) ? 0 : 1;
+    if (bCleanHyphen !== aCleanHyphen) return bCleanHyphen - aCleanHyphen;
+
+    const aPrices = getAllAvailablePrices(a).length;
+    const bPrices = getAllAvailablePrices(b).length;
+    if (bPrices !== aPrices) return bPrices - aPrices;
+
+    const aNonOther = String(a.category || '').trim().toLowerCase() !== 'other' ? 1 : 0;
+    const bNonOther = String(b.category || '').trim().toLowerCase() !== 'other' ? 1 : 0;
+    if (bNonOther !== aNonOther) return bNonOther - aNonOther;
+
+    return String(a.name || '').length - String(b.name || '').length
+      || String(a.name || '').localeCompare(String(b.name || ''));
+  });
+}
+
+function extractVariantSignature(name) {
+  const raw = normalizeText(name);
+  const matches = raw.match(VARIANT_MODIFIER_RX) || [];
+  const norm = matches.map(t => t.replace(/\s+/g, '')).sort();
+  return [...new Set(norm)].join('|');
+}
+
+function extractBaseNameWithoutGenericParens(name, genericNorm) {
+  const stripped = String(name ?? '').replace(/\(([^)]+)\)/g, (_m, inner) => {
+    const innerNorm = normalizeText(inner);
+    if (genericNorm && innerNorm === genericNorm) return '';
+    return ` ${inner} `;
+  });
+  return normalizeMedicationNameKey(stripped)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function findPotentialDuplicateGroups(meds = []) {
+  const active = (meds || []).filter(m => m && m.is_active !== false && String(m.name || '').trim());
+  const groups = [];
+  const groupedIds = new Set();
+
+  // 1. Exact case / spacing / hyphen / punctuation duplicates
+  const byExact = new Map();
+  for (const m of active) {
+    const key = normalizeMedicationNameKey(m.name);
+    const alpha = key.replace(/[^a-z0-9]/g, '');
+    const bucketKey = alpha.length >= 4 ? `alpha:${alpha}` : `key:${key}`;
+    if (!byExact.has(bucketKey)) byExact.set(bucketKey, []);
+    byExact.get(bucketKey).push(m);
+  }
+
+  for (const list of byExact.values()) {
+    if (list.length >= 2) {
+      const sorted = sortDuplicateGroupItems(list);
+      sorted.forEach(m => groupedIds.add(String(m.id)));
+      groups.push({
+        reason: 'Same name (capitalization / spacing difference)',
+        items: sorted,
+      });
+    }
+  }
+
+  // 2. Near-duplicates sharing exact base name (e.g. "Biophage" vs "Biophage (Metformin)") + generic
+  const byBase = new Map();
+  for (const m of active) {
+    if (groupedIds.has(String(m.id))) continue;
+    const meta = inferGenericAndCompany(m);
+    const genericNorm = normalizeText(meta.generic || '');
+    if (!genericNorm) continue;
+
+    const base = extractBaseNameWithoutGenericParens(m.name, genericNorm);
+    if (!base) continue;
+
+    const companyNorm = normalizeText(meta.company || '');
+    const variantSig = extractVariantSignature(m.name);
+    const key = `${base}::${genericNorm}::${companyNorm}::${variantSig}`;
+    if (!byBase.has(key)) byBase.set(key, []);
+    byBase.get(key).push(m);
+  }
+
+  for (const list of byBase.values()) {
+    if (list.length >= 2) {
+      const sorted = sortDuplicateGroupItems(list);
+      groups.push({
+        reason: 'Same brand, ingredient & strength (extra label)',
+        items: sorted,
+      });
+    }
+  }
+
+  return groups;
+}
